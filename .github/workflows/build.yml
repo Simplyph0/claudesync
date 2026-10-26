@@ -1,0 +1,150 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-server:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test sync engine and server
+        run: go test ./internal/...
+      - name: Build server (all platforms)
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          for t in windows/amd64 windows/arm64 linux/amd64 linux/arm64 linux/arm; do
+            os=${t%/*}; arch=${t#*/}; name=$arch; ext=""
+            [ "$arch" = arm ] && name=armv7
+            [ "$os" = windows ] && ext=.exe
+            GOOS=$os GOARCH=$arch GOARM=7 go build -trimpath -ldflags "-s -w" \
+              -o "dist/claudesync-server-$os-$name$ext" ./cmd/claudesync-server
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server
+          path: dist/*
+
+  client-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Get llvm-mingw (C compiler for x64 and ARM64)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download -R mstorsjo/llvm-mingw --pattern '*-ucrt-x86_64.zip' -O llvm-mingw.zip
+          7z x -y llvm-mingw.zip > /dev/null
+          echo "$(cygpath -w "$PWD"/llvm-mingw-*-ucrt-x86_64/bin)" >> "$GITHUB_PATH"
+      - name: Build client
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          if [ "${{ matrix.arch }}" = arm64 ]; then export CC=aarch64-w64-mingw32-clang; else export CC=x86_64-w64-mingw32-clang; fi
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -H=windowsgui" -o dist/claudesync-windows-${{ matrix.arch }}.exe ./cmd/claudesync
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-windows-${{ matrix.arch }}
+          path: dist/*
+
+  client-linux:
+    strategy:
+      matrix:
+        include:
+          - name: amd64
+            runner: ubuntu-24.04
+          - name: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: GUI build dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev
+      - name: Build client
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o dist/claudesync-linux-${{ matrix.name }} ./cmd/claudesync
+      - name: GUI smoke test
+        run: xvfb-run -a go test ./cmd/claudesync
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-linux-${{ matrix.name }}
+          path: dist/*
+
+  client-linux-armv7:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: armhf cross toolchain and libraries
+        run: |
+          # The default mirrors have no armhf packages; add Ubuntu Ports for armhf only.
+          sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
+          . /etc/os-release
+          printf 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: %s %s-updates %s-security\nComponents: main universe\nArchitectures: armhf\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' \
+            "$VERSION_CODENAME" "$VERSION_CODENAME" "$VERSION_CODENAME" | sudo tee /etc/apt/sources.list.d/armhf.sources
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf pkg-config \
+            libgl1-mesa-dev:armhf libx11-dev:armhf libxcursor-dev:armhf libxrandr-dev:armhf \
+            libxinerama-dev:armhf libxi-dev:armhf libxxf86vm-dev:armhf libxkbcommon-dev:armhf
+      - name: Build client
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: arm
+          GOARM: "7"
+          CC: arm-linux-gnueabihf-gcc
+          PKG_CONFIG_PATH: /usr/lib/arm-linux-gnueabihf/pkgconfig
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o dist/claudesync-linux-armv7 ./cmd/claudesync
+          file dist/claudesync-linux-armv7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-linux-armv7
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test-and-server, client-windows, client-linux, client-linux-armv7]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* -R "${{ github.repository }}" --title "${{ github.ref_name }}" --generate-notes
