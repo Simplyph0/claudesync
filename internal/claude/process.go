@@ -163,7 +163,7 @@ func startDetached(path string) error {
 // storeAppID turns ...\WindowsApps\Claude_3.1.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe
 // into the Store app id "Claude_pzs8sxrjxfjjc!Claude".
 func storeAppID(exe string) string {
-	parts := strings.Split(filepath.ToSlash(exe), "/")
+	parts := strings.Split(strings.ReplaceAll(exe, `\`, "/"), "/")
 	for i, p := range parts {
 		if strings.EqualFold(p, "WindowsApps") && i+1 < len(parts) {
 			pkg := parts[i+1]
