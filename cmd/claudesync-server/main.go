@@ -164,6 +164,13 @@ func cmdInit(dir, lan, local string, retention int) error {
 	fmt.Println("Server initialised in", dir)
 	fmt.Println("Certificate fingerprint (PCs will ask you to confirm this):")
 	fmt.Println("  " + server.Fingerprint(cert.Certificate[0]))
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		fmt.Println()
+		fmt.Println("Note: you ran init without sudo, so this setup is in your home folder.")
+		fmt.Println("The background service (installed with sudo) uses /var/lib/claudesync instead.")
+		fmt.Println("To run it as a service, run 'sudo claudesync-server init' and then 'sudo claudesync-server install'.")
+		return nil
+	}
 	fmt.Println("Next: 'claudesync-server install' (as admin/root) to run it in the background,")
 	fmt.Println("or 'claudesync-server run' to try it in this window.")
 	return nil
@@ -309,6 +316,10 @@ func cmdService(cmd, dir string) error {
 		}
 		return svc.Run()
 	case "install":
+		// The service would start and immediately fail without a password.
+		if st, err := server.Open(dir); err != nil || !st.HasPassword() {
+			return fmt.Errorf("no server password in %s yet; run init with the same user first (on Linux: 'sudo claudesync-server init')", dir)
+		}
 		if err := svc.Install(); err != nil {
 			return err
 		}
