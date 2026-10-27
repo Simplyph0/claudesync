@@ -3,6 +3,7 @@ package projsync
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -525,5 +526,49 @@ func TestServerCleansUnusedChunks(t *testing.T) {
 	_, err = a.m.API.PutManifest(context.Background(), proto.KindProject, "prj_x", proto.ManifestUpload{Blob: []byte("x"), Refs: []string{"k" + strings.Repeat("0", 64)}})
 	if err == nil {
 		t.Fatal("manifest with missing chunks accepted")
+	}
+}
+
+// Switching a project from Back up only to Sync must not treat the backup's
+// file list as "what the PCs agreed on" (that made every file look deleted
+// elsewhere, because the shared copy didn't exist yet).
+func TestSwitchBackupToSyncKeepsFiles(t *testing.T) {
+	w := newWorld(t)
+	a := w.pc("A", ModeBackup)
+	a.m.Settings.BigChange = BigContinue // the dangerous setting: no guard to catch it
+	for i := 0; i < 5; i++ {
+		a.write(fmt.Sprintf("f%d.txt", i), "x", time.Hour)
+	}
+	a.sync()
+	a.m.SetProject(Project{Key: key, Name: "sketch", Folder: a.folder, Mode: ModeSync})
+	a.sync()
+	eq(t, "files kept", len(a.list()), 5)
+	if d := a.status().Decision; d != nil {
+		t.Fatalf("unexpected question: %+v", d)
+	}
+	if len(a.m.Trash().List()) != 0 {
+		t.Fatal("files went to trash")
+	}
+	b := w.pc("B", ModeSync)
+	b.sync()
+	eq(t, "B got them", len(b.list()), 5)
+}
+
+// With nothing on the server, local files are never treated as deleted.
+func TestNoServerCopyNeverTrashes(t *testing.T) {
+	w := newWorld(t)
+	a := w.pc("A", ModeSync)
+	a.m.Settings.BigChange = BigContinue
+	a.write("x.txt", "x", time.Hour)
+	a.sync()
+	id := itemID(key)
+	if _, err := w.store.SetRemoved(proto.KindProject, id, true); err != nil {
+		t.Fatal(err)
+	}
+	w.store.PurgeRemoved(time.Now().Add(365 * 24 * time.Hour)) // server copy gone for good
+	a.sync()
+	eq(t, "still there", a.read("x.txt"), "x")
+	if len(a.m.Trash().List()) != 0 {
+		t.Fatal("files went to trash")
 	}
 }

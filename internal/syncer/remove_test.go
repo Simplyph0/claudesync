@@ -109,3 +109,19 @@ func TestSkipPending(t *testing.T) {
 		t.Fatalf("un-skip didn't restore it: %v", s)
 	}
 }
+
+// Project folders live in the same server store; chat sync must leave them alone.
+func TestProjectItemsIgnoredByChatSync(t *testing.T) {
+	w := newWorld(t)
+	desk := w.pc("Desktop", "code")
+	desk.addSession("local_aaaa", cliA, "Chat")
+	if _, err := desk.eng.API.PutManifest(context.Background(), proto.KindProject, "prj_abc", proto.ManifestUpload{Blob: []byte("not a chat"), Refs: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := desk.eng.Sync(context.Background()); err != nil {
+		t.Fatalf("chat sync tripped over a project item: %v", err)
+	}
+	if p := desk.eng.Status().Pending; len(p) != 0 {
+		t.Fatalf("project item queued as a chat restore: %+v", p)
+	}
+}

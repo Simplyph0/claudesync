@@ -390,6 +390,9 @@ func (e *Engine) sync(ctx context.Context) error {
 	e.mu.Lock()
 	pending := map[string]*Pending{}
 	for _, h := range list.Items {
+		if h.Kind == proto.KindProject {
+			continue // project folders are synced by ProjectSync
+		}
 		k := h.Key()
 		if h.Removed {
 			e.st.Removed[k] = true

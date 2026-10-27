@@ -109,6 +109,7 @@ type Clash struct {
 
 type pstate struct {
 	BaseVersion int                   `json:"baseVersion"`
+	BaseItem    string                `json:"baseItem,omitempty"` // server item the base belongs to (synced or backup)
 	Cache       map[string]cacheEntry `json:"cache"`
 	Decision    *Decision             `json:"decision,omitempty"`
 	Clashes     map[string]*Clash     `json:"clashes,omitempty"`
@@ -305,9 +306,26 @@ func (m *Manager) SetProject(p Project) error {
 		_ = os.Remove(m.basePath(p.Key))
 		delete(m.states, p.Key)
 		_ = os.Remove(m.statePath(p.Key))
+	} else if old != nil && old.Mode != p.Mode {
+		// Back up only and Sync use different server copies: what was agreed
+		// for one says nothing about the other.
+		m.resetLocked(p.Key)
+		_ = m.saveStateLocked(p.Key)
 	}
 	m.projects[p.Key] = &p
 	return m.saveProjectsLocked()
+}
+
+// resetLocked forgets what this PC last agreed with the server for a
+// project, and any questions about it. Files on disk aren't touched.
+func (m *Manager) resetLocked(key string) {
+	st := m.stateLocked(key)
+	_ = os.Remove(m.basePath(key))
+	st.BaseVersion, st.BaseItem = 0, ""
+	st.Decision = nil
+	st.Once = map[string]string{}
+	st.Clashes = map[string]*Clash{}
+	st.Resolved = map[string]string{}
 }
 
 // Forget stops managing a project on this PC. Its files aren't touched.
@@ -499,8 +517,11 @@ func (m *Manager) backup(ctx context.Context, p Project) error {
 	if m.tooLarge(p, res.total) {
 		return m.waitFor(p.Key, &Decision{Kind: "large", Message: fmt.Sprintf("%s is %d MB, over the %d MB project limit. Back it up anyway?", p.Name, res.total>>20, m.Settings.MaxProjectMB)})
 	}
-	base := m.loadBase(p.Key)
 	id := m.backupID(p.Key)
+	base := m.loadBase(p.Key)
+	if st.BaseItem != id {
+		base = nil
+	}
 	man := newManifest(p.Key, p.Name, m.DeviceName)
 	man.Git = readGit(p.Folder)
 	for path, e := range res.files {
@@ -513,7 +534,7 @@ func (m *Manager) backup(ctx context.Context, p Project) error {
 			}
 		}
 		if sameFiles(base.Files, man.Files) {
-			m.finish(p.Key, st.BaseVersion, base, "backed up", nil)
+			m.finish(p.Key, id, st.BaseVersion, base, "backed up", nil)
 			return nil
 		}
 	}
@@ -535,7 +556,7 @@ func (m *Manager) backup(ctx context.Context, p Project) error {
 	if err != nil {
 		return err
 	}
-	m.finish(p.Key, h.Version, man, "backed up", nil)
+	m.finish(p.Key, id, h.Version, man, "backed up", nil)
 	m.logf("project %s: backed up version %d", p.Name, h.Version)
 	return nil
 }
@@ -561,14 +582,14 @@ func sameFiles(a, b map[string]*Entry) bool {
 	return true
 }
 
-func (m *Manager) finish(key string, version int, base *Manifest, status string, clashes map[string]*Clash) {
+func (m *Manager) finish(key, item string, version int, base *Manifest, status string, clashes map[string]*Clash) {
 	if base != nil {
 		_ = m.saveBase(key, base)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := m.stateLocked(key)
-	st.BaseVersion = version
+	st.BaseVersion, st.BaseItem = version, item
 	st.LastSync = m.Now()
 	st.Status = status
 	st.Error = ""
@@ -770,14 +791,10 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	if err := os.MkdirAll(p.Folder, 0o755); err != nil {
 		return err
 	}
+	id := itemID(p.Key)
 	m.mu.Lock()
 	st := m.stateLocked(p.Key)
-	waiting := st.Decision != nil
 	m.mu.Unlock()
-	if waiting {
-		return nil // still waiting for the user
-	}
-	id := itemID(p.Key)
 	R, rh, err := m.remote(ctx, id)
 	if err != nil {
 		return err
@@ -786,6 +803,29 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 		m.setStatus(p.Key, "removed from the server backup; not syncing", nil)
 		return nil
 	}
+	// The base must be what this PC last agreed for this very item. A base from
+	// the project's backup (or from before 0.4.1 recorded which item it was)
+	// only counts if it matches the server copy exactly.
+	B := m.loadBase(p.Key)
+	m.mu.Lock()
+	if st.BaseItem != id {
+		if st.BaseItem == "" && B != nil && R != nil && st.BaseVersion == rh.Version && sameFiles(B.Files, R.Files) {
+			st.BaseItem = id
+		} else {
+			m.resetLocked(p.Key)
+			st.BaseItem = id // the (now empty) base belongs to this item: don't reset again
+			B = nil
+		}
+		_ = m.saveStateLocked(p.Key)
+	}
+	waiting := st.Decision != nil
+	m.mu.Unlock()
+	if waiting {
+		return nil // still waiting for the user
+	}
+	if R == nil {
+		B = nil // nothing on the server: never conclude files were deleted elsewhere
+	}
 	res, err := m.scanFolder(p, st)
 	if err != nil {
 		return err
@@ -793,7 +833,6 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	if m.tooLarge(p, res.total) {
 		return m.waitFor(p.Key, &Decision{Kind: "large", Message: fmt.Sprintf("%s is %d MB, over the %d MB project limit. Sync it anyway?", p.Name, res.total>>20, m.Settings.MaxProjectMB)})
 	}
-	B := m.loadBase(p.Key)
 	if B != nil && st.BaseVersion == 0 {
 		B = nil
 	}
@@ -1131,7 +1170,7 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	}
 	st.Skipped = append(st.Skipped, w.notes...)
 	m.mu.Unlock()
-	m.finish(p.Key, version, newBase, status, clashes)
+	m.finish(p.Key, id, version, newBase, status, clashes)
 	return errors.Join(errs...)
 }
 
@@ -1264,7 +1303,7 @@ func (m *Manager) Download(ctx context.Context, id string, version int, folder s
 		for rel := range w.failed {
 			delete(base.Files, rel)
 		}
-		m.finish(man.Key, h.Version, base, "downloaded", nil)
+		m.finish(man.Key, id, h.Version, base, "downloaded", nil)
 	}
 	m.logf("downloaded %d file(s) of %s into %s", n, man.Name, folder)
 	return n, errors.Join(errs...)
