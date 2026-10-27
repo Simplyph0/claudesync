@@ -347,3 +347,43 @@ func (c *Client) BringBack(ctx context.Context, kind, id string) (proto.ItemHead
 	var h proto.ItemHeader
 	return h, c.call(ctx, "POST", "/api/items/"+kind+"/"+id+"/restore", nil, &h)
 }
+
+// MissingChunks asks which chunks the server doesn't have yet.
+func (c *Client) MissingChunks(ctx context.Context, ids []string) ([]string, error) {
+	var missing []string
+	for i := 0; i < len(ids); i += 20000 {
+		var out proto.ChunkList
+		if err := c.call(ctx, "POST", "/api/chunks/missing", proto.ChunkList{IDs: ids[i:min(i+20000, len(ids))]}, &out); err != nil {
+			return nil, err
+		}
+		missing = append(missing, out.IDs...)
+	}
+	return missing, nil
+}
+
+func (c *Client) PutChunk(ctx context.Context, id string, blob []byte) error {
+	resp, err := c.do(ctx, "PUT", "/api/chunks/"+id, blob, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkStatus(resp)
+}
+
+func (c *Client) GetChunk(ctx context.Context, id string) ([]byte, error) {
+	resp, err := c.do(ctx, "GET", "/api/chunks/"+id, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// PutManifest uploads a project version with the chunks it uses.
+func (c *Client) PutManifest(ctx context.Context, kind, id string, up proto.ManifestUpload) (proto.ItemHeader, error) {
+	var h proto.ItemHeader
+	return h, c.call(ctx, "PUT", "/api/manifests/"+kind+"/"+id, up, &h)
+}

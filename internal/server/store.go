@@ -291,11 +291,26 @@ func (s *Store) blobPath(kind, id string, v int) string {
 // Put stores a new version. base must equal the current latest version
 // (0 for a new item) or ErrConflict is returned.
 func (s *Store) Put(dev proto.Device, kind, id string, base int, blob, meta []byte) (proto.ItemHeader, error) {
+	return s.PutRefs(dev, kind, id, base, blob, meta, nil)
+}
+
+// PutRefs is Put for project manifests: refs lists the chunks the version
+// uses. They must all be on the server already, and they're kept for as
+// long as the version is.
+func (s *Store) PutRefs(dev proto.Device, kind, id string, base int, blob, meta []byte, refs []string) (proto.ItemHeader, error) {
 	if !proto.ValidID(kind) || !proto.ValidID(id) || len(meta) > 4096 {
 		return proto.ItemHeader{}, ErrInvalidInput
 	}
-	s.mu.Lock()
+	for _, r := range refs {
+		if !chunkIDRe.MatchString(r) {
+			return proto.ItemHeader{}, ErrInvalidInput
+		}
+	}
+	s.mu.Lock() // also keeps GCChunks out while the refs are checked and written
 	defer s.mu.Unlock()
+	if missing := s.MissingChunks(refs); len(missing) > 0 {
+		return proto.ItemHeader{}, fmt.Errorf("%w: %d chunk(s) not uploaded yet", ErrMissingChunks, len(missing))
+	}
 	key := kind + "/" + id
 	m := s.idx.Items[key]
 	if m != nil && m.Removed {
@@ -312,6 +327,12 @@ func (s *Store) Put(dev proto.Device, kind, id string, base int, blob, meta []by
 	p := s.blobPath(kind, id, h.Version)
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return proto.ItemHeader{}, err
+	}
+	if refs != nil {
+		rb, _ := json.Marshal(refs)
+		if err := writeFileAtomic(s.refsPath(kind, id, h.Version), rb); err != nil {
+			return proto.ItemHeader{}, err
+		}
 	}
 	if err := writeFileAtomic(p, blob); err != nil {
 		return proto.ItemHeader{}, err
@@ -330,6 +351,7 @@ func (s *Store) pruneLocked(m *itemMeta) {
 	for len(m.Versions) > s.cfg.Retention {
 		old := m.Versions[0]
 		_ = os.Remove(s.blobPath(m.Kind, m.ID, old.Version))
+		_ = os.Remove(s.refsPath(m.Kind, m.ID, old.Version))
 		m.Versions = m.Versions[1:]
 	}
 }
@@ -417,6 +439,7 @@ func (s *Store) Get(kind, id string, v int) (proto.ItemHeader, []byte, error) {
 				h, found = x, true
 			}
 		}
+		h.Removed, h.RemovedAt = m.Removed, m.RemovedAt
 	}
 	s.mu.Unlock()
 	if !found {

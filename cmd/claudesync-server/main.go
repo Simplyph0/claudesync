@@ -274,6 +274,11 @@ func (p *program) Start(s service.Service) error {
 				return
 			case <-t.C:
 				st.CleanUploads()
+				if n, err := st.GCChunks(24 * time.Hour); err != nil {
+					log.Printf("chunk cleanup: %v", err)
+				} else if n > 0 {
+					log.Printf("deleted %d project chunk(s) no version uses any more", n)
+				}
 				if n := st.PurgeRemoved(time.Now()); n > 0 {
 					log.Printf("deleted %d item(s) removed more than %d days ago", n, proto.RemovedHoldDays)
 				}

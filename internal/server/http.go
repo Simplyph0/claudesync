@@ -53,6 +53,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/items/{kind}/{id}/versions", s.auth(s.itemVersions))
 	mux.Handle("PUT /api/items/{kind}/{id}", s.auth(s.putItem))
 	mux.Handle("DELETE /api/items/{kind}/{id}", s.auth(s.removeItem))
+	mux.Handle("PUT /api/manifests/{kind}/{id}", s.auth(s.putManifest))
+	mux.Handle("POST /api/chunks/missing", s.auth(s.missingChunks))
+	mux.Handle("PUT /api/chunks/{id}", s.auth(s.putChunkBlob))
+	mux.Handle("GET /api/chunks/{id}", s.auth(s.getChunkBlob))
 	mux.Handle("POST /api/items/{kind}/{id}/restore", s.auth(s.restoreItem))
 	mux.Handle("POST /api/uploads", s.auth(s.startUpload))
 	mux.Handle("PUT /api/uploads/{upload}/{n}", s.auth(s.putChunk))
@@ -259,6 +263,8 @@ func (s *Server) check(w http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil:
 		return true
+	case errors.Is(err, ErrMissingChunks):
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, ErrRemoved):
 		writeErr(w, http.StatusGone, err.Error())
 	case errors.Is(err, ErrConflict):
@@ -376,4 +382,55 @@ func (s *Server) restoreItem(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Logf("device %q brought back %s", deviceFrom(r).Name, h.Key())
 	writeJSON200(w, h)
+}
+
+// putManifest stores a project version together with the chunks it uses.
+func (s *Server) putManifest(w http.ResponseWriter, r *http.Request) {
+	var req proto.ManifestUpload
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 96<<20)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid manifest upload")
+		return
+	}
+	if req.Refs == nil {
+		req.Refs = []string{}
+	}
+	h, err := s.store.PutRefs(deviceFrom(r), r.PathValue("kind"), r.PathValue("id"), req.Base, req.Blob, req.Meta, req.Refs)
+	if !s.check(w, err) {
+		return
+	}
+	writeJSON200(w, h)
+}
+
+func (s *Server) missingChunks(w http.ResponseWriter, r *http.Request) {
+	var req proto.ChunkList
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil || len(req.IDs) > 50000 {
+		writeErr(w, http.StatusBadRequest, "invalid chunk list")
+		return
+	}
+	missing := s.store.MissingChunks(req.IDs)
+	if missing == nil {
+		missing = []string{}
+	}
+	writeJSON200(w, proto.ChunkList{IDs: missing})
+}
+
+func (s *Server) putChunkBlob(w http.ResponseWriter, r *http.Request) {
+	blob, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxChunkBlob+1))
+	if err != nil {
+		writeErr(w, http.StatusRequestEntityTooLarge, "chunk too large")
+		return
+	}
+	if !s.check(w, s.store.StoreChunk(r.PathValue("id"), blob)) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) getChunkBlob(w http.ResponseWriter, r *http.Request) {
+	b, err := s.store.LoadChunk(r.PathValue("id"))
+	if !s.check(w, err) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	_, _ = w.Write(b)
 }

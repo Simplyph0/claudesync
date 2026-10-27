@@ -18,7 +18,8 @@ See [DESIGN.md](DESIGN.md) for how it works inside.
 | Desktop app Code-tab sessions: title, model and settings, plus the full conversation | Your Claude login and any credentials |
 | Working folders of sessions started without a project folder (default limit 200 MB each) | `settings.local.json` (meant to stay on one machine) |
 | `~/.claude` settings, `CLAUDE.md`, commands, skills, agents, output styles | The desktop app's own MCP config (`claude_desktop_config.json`) |
-| Per-project memory | Your project files themselves (use git for those) |
+| Per-project memory | |
+| Project folders you choose: backed up, or kept in sync on every PC ([details](docs/PROJECT_SYNC.md)) | Project folders you leave Off |
 | *(optional)* Terminal-only Claude Code sessions | |
 
 ## Server setup

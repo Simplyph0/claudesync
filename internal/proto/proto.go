@@ -7,7 +7,7 @@ import (
 )
 
 // Version is the protocol/app version reported by both programs.
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 // Item kinds.
 const (
@@ -113,4 +113,19 @@ type UploadStart struct {
 
 type ErrorResponse struct {
 	Error string `json:"error"`
+}
+
+// Project sync.
+const KindProject = "project"
+
+// ManifestUpload is a project version plus the chunks it uses.
+type ManifestUpload struct {
+	Base int      `json:"base"`
+	Meta []byte   `json:"meta,omitempty"`
+	Blob []byte   `json:"blob"`
+	Refs []string `json:"refs"`
+}
+
+type ChunkList struct {
+	IDs []string `json:"ids"`
 }

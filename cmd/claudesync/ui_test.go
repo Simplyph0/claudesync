@@ -15,6 +15,7 @@ import (
 	"github.com/Simplyph0/claudesync/internal/appcfg"
 	"github.com/Simplyph0/claudesync/internal/claude"
 	"github.com/Simplyph0/claudesync/internal/client"
+	"github.com/Simplyph0/claudesync/internal/projsync"
 	"github.com/Simplyph0/claudesync/internal/server"
 	"github.com/Simplyph0/claudesync/internal/syncer"
 	"github.com/Simplyph0/claudesync/internal/vault"
@@ -60,7 +61,33 @@ func TestScreens(t *testing.T) {
 		}
 	}
 	cl2.Remove(t.Context(), "session", "local_b")
-	_ = a.eng.Sync(t.Context()) // Claude "open": the remaining session waits
+
+	// Project folders: the laptop syncs "sketch"; this PC links its own,
+	// different copy, which waits for a decision.
+	old := time.Now().Add(-time.Hour)
+	mkProj := func(folder, file, content string) {
+		os.MkdirAll(folder, 0o755)
+		os.WriteFile(filepath.Join(folder, file), []byte(content), 0o644)
+		os.Chtimes(filepath.Join(folder, file), old, old)
+	}
+	pmB, _ := projsync.Open(t.TempDir())
+	pmB.API, pmB.Keys, pmB.DeviceID, pmB.DeviceName = cl2, projsync.NewKeys(key), other.DeviceID, "Laptop"
+	fb := filepath.Join(t.TempDir(), "sketch")
+	mkProj(fb, "sketch.ino", "laptop version")
+	pmB.SetProject(projsync.Project{Key: "name:sketch", Name: "sketch", Folder: fb, Mode: projsync.ModeSync})
+	if err := pmB.Sync(t.Context(), "name:sketch"); err != nil {
+		t.Fatal(err)
+	}
+	pmA, _ := projsync.Open(t.TempDir())
+	pmA.API, pmA.Keys, pmA.DeviceID, pmA.DeviceName = cl, projsync.NewKeys(key), resp.DeviceID, "Desktop"
+	fa := filepath.Join(t.TempDir(), "sketch")
+	mkProj(fa, "sketch.ino", "desktop version")
+	mkProj(fa, "notes.txt", "x")
+	pmA.SetProject(projsync.Project{Key: "name:sketch", Name: "sketch", Folder: fa, Mode: projsync.ModeSync})
+	pmA.SetProject(projsync.Project{Key: "name:website", Name: "website", Folder: t.TempDir(), Mode: projsync.ModeBackup})
+	a.eng.ProjectSync = pmA
+
+	_ = a.eng.Sync(t.Context()) // Claude "open": the remaining session waits; sketch asks how to link
 	a.log.Printf("ClaudeSync started")
 	a.log.Printf("restore: applied 3 item(s) from other PCs")
 
@@ -85,4 +112,16 @@ func TestScreens(t *testing.T) {
 		fyne.DoAndWait(func() { tabs.SelectIndex(i) })
 		save("tab-"+name, tabs)
 	}
+	proj, _ := a.projectsTab()
+	inner := proj.(*container.AppTabs)
+	for i, name := range []string{"folders", "needs", "server", "chats"} {
+		fyne.DoAndWait(func() { inner.SelectIndex(i) })
+		time.Sleep(300 * time.Millisecond) // "On the server" loads in the background
+		save("projects-"+name, inner)
+	}
+	if d := pmA.Projects(); len(d) != 2 || d[0].Decision == nil && d[1].Decision == nil {
+		t.Fatalf("expected sketch to wait for a first-link decision: %+v", d)
+	}
+	fyne.DoAndWait(func() { a.win.Resize(fyne.NewSize(760, 1500)) })
+	save("settings-full", a.settingsTab())
 }

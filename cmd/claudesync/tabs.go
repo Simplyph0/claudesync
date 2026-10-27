@@ -19,6 +19,7 @@ import (
 	"github.com/Simplyph0/claudesync/internal/autostart"
 	"github.com/Simplyph0/claudesync/internal/claude"
 	"github.com/Simplyph0/claudesync/internal/client"
+	"github.com/Simplyph0/claudesync/internal/projsync"
 	"github.com/Simplyph0/claudesync/internal/proto"
 	"github.com/Simplyph0/claudesync/internal/syncer"
 )
@@ -155,7 +156,7 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 
 // --- Projects ---
 
-func (a *App) projectsTab() (fyne.CanvasObject, func()) {
+func (a *App) chatFoldersTab() (fyne.CanvasObject, func()) {
 	type row struct {
 		key, name, path string
 		unmapped        bool
@@ -444,6 +445,10 @@ func (a *App) historyTab() fyne.CanvasObject {
 }
 
 func (a *App) confirmRollback(v proto.ItemHeader) {
+	if v.Kind == proto.KindProject {
+		a.restoreProjectVersion(v.ID, v.Version, v.ID)
+		return
+	}
 	dialog.ShowConfirm("Restore an older version?", fmt.Sprintf("Replace this PC's copy with version %d from %s (%s)?", v.Version, v.DeviceName, v.Time.Local().Format("2006-01-02 15:04")), func(ok bool) {
 		if !ok {
 			return
@@ -496,6 +501,49 @@ func (a *App) settingsTab() fyne.CanvasObject {
 	claudeHome := widget.NewEntry()
 	claudeHome.SetText(c.ClaudeHome)
 	claudeHome.SetPlaceHolder("auto (~/.claude)")
+	// Project folders: what to always do, or ask.
+	pick := func(names, values []string, cur string) *widget.Select {
+		s := widget.NewSelect(names, nil)
+		s.SetSelectedIndex(indexOf(values, cur))
+		return s
+	}
+	projDefault := pick([]string{"Off (I'll pick)", "Back up only", "Sync"}, modeValues, c.ProjectDefault)
+	gitDefault := pick([]string{"Back up only", "Sync"}, []string{projsync.ModeBackup, projsync.ModeSync}, c.ProjectGitDefault)
+	clashPol := pick([]string{"Keep both", "Newest wins", "Ask me"}, clashVals[1:], c.ClashPolicy)
+	firstLink := pick([]string{"Ask me (show a preview)", "Always merge", "Always use the server's copy", "Always use this PC's copy"},
+		[]string{projsync.LinkAsk, projsync.LinkMerge, projsync.LinkServer, projsync.LinkLocal}, c.FirstLink)
+	bigChange := pick([]string{"Ask me", "Always go ahead"}, []string{projsync.BigAsk, projsync.BigContinue}, c.BigChange)
+	gitGuard := pick([]string{"Ask me", "Always sync anyway", "Never (wait until they match)"},
+		[]string{projsync.GitAsk, projsync.GitSync, projsync.GitSkip}, c.GitGuard)
+	remoteDel := pick([]string{"Move them to the trash here too", "Ask me"}, []string{projsync.DeletesTrash, projsync.DeletesAsk}, c.RemoteDeletes)
+	num := func(v int) *widget.Entry {
+		e := widget.NewEntry()
+		e.SetText(strconv.Itoa(v))
+		return e
+	}
+	maxFile, maxProj, trashDays, trashGB, upCap := num(c.MaxFileMB), num(c.MaxProjectMB), num(c.TrashDays), num(c.TrashGB), num(c.UploadCapMB)
+	lanOnly := widget.NewCheck("Only sync project folders on my home network", nil)
+	lanOnly.SetChecked(c.ProjectsLANOnly)
+	readProjectSettings := func(n *appcfg.Settings) error {
+		vals := map[*widget.Entry]*int{maxFile: &n.MaxFileMB, maxProj: &n.MaxProjectMB, trashDays: &n.TrashDays, trashGB: &n.TrashGB, upCap: &n.UploadCapMB}
+		for e, dst := range vals {
+			v, err := strconv.Atoi(strings.TrimSpace(e.Text))
+			if err != nil || v < 0 {
+				return errors.New("project limits must be whole numbers (0 or more)")
+			}
+			*dst = v
+		}
+		n.ProjectDefault = modeValues[projDefault.SelectedIndex()]
+		n.ProjectGitDefault = []string{projsync.ModeBackup, projsync.ModeSync}[gitDefault.SelectedIndex()]
+		n.ClashPolicy = clashVals[1:][clashPol.SelectedIndex()]
+		n.FirstLink = []string{projsync.LinkAsk, projsync.LinkMerge, projsync.LinkServer, projsync.LinkLocal}[firstLink.SelectedIndex()]
+		n.BigChange = []string{projsync.BigAsk, projsync.BigContinue}[bigChange.SelectedIndex()]
+		n.GitGuard = []string{projsync.GitAsk, projsync.GitSync, projsync.GitSkip}[gitGuard.SelectedIndex()]
+		n.RemoteDeletes = []string{projsync.DeletesTrash, projsync.DeletesAsk}[remoteDel.SelectedIndex()]
+		n.ProjectsLANOnly = lanOnly.Checked
+		return nil
+	}
+
 	loc := claude.Detect(c.ClaudeHome, c.DesktopDir)
 	desktopDir := widget.NewSelectEntry(loc.Candidates)
 	desktopDir.SetText(c.DesktopDir)
@@ -515,6 +563,10 @@ func (a *App) settingsTab() fyne.CanvasObject {
 		smb, err3 := strconv.Atoi(strings.TrimSpace(scratchMB.Text))
 		if err1 != nil || err2 != nil || err3 != nil || bm < 1 || rm < 1 || smb < 1 {
 			dialog.ShowError(errors.New("intervals and size limit must be whole numbers of at least 1"), a.win)
+			return
+		}
+		if err := readProjectSettings(&n); err != nil {
+			dialog.ShowError(err, a.win)
 			return
 		}
 		newLAN := lanURL(lan.Text)
@@ -583,7 +635,22 @@ func (a *App) settingsTab() fyne.CanvasObject {
 		widget.NewFormItem("Desktop app data folder", container.NewVBox(desktopDir, desktopNote)),
 		widget.NewFormItem("", login),
 	)
-	return container.NewVScroll(container.NewPadded(container.NewVBox(form, save)))
+	projForm := widget.NewForm(
+		widget.NewFormItem("New projects", projDefault),
+		widget.NewFormItem("…but pushed git projects at most", gitDefault),
+		widget.NewFormItem("Same file changed on two PCs", clashPol),
+		widget.NewFormItem("Linking a folder that already has files", firstLink),
+		widget.NewFormItem("A sync would remove many files", bigChange),
+		widget.NewFormItem("PCs on different git branches", gitGuard),
+		widget.NewFormItem("Files deleted on another PC", remoteDel),
+		widget.NewFormItem("Largest file (MB)", maxFile),
+		widget.NewFormItem("Ask above project size (MB)", maxProj),
+		widget.NewFormItem("Keep trash (days / GB)", container.NewGridWithColumns(2, trashDays, trashGB)),
+		widget.NewFormItem("Upload limit per sync (MB, 0 = none)", upCap),
+		widget.NewFormItem("", lanOnly),
+	)
+	projNote := widget.NewLabel("Text files changed in different places on two PCs are always merged automatically.\nAn emptied project folder always asks before anything is deleted on your other PCs.")
+	return container.NewVScroll(container.NewPadded(container.NewVBox(form, bold("Project folders"), projNote, projForm, save)))
 }
 
 // --- Recover ---
@@ -691,9 +758,16 @@ func (a *App) recoverTab() fyne.CanvasObject {
 	orphansBox := container.NewBorder(top, adopt, nil, nil, orphanList)
 	snapsBox := container.NewBorder(container.NewVBox(bold("Snapshots"),
 		wrapLabel("Before every change, ClaudeSync saves the files it is about to replace. Putting a snapshot back restores those files exactly; nothing is deleted.")), nil, nil, nil, snapList)
-	split := container.NewVSplit(orphansBox, snapsBox)
-	split.Offset = 0.55
-	return container.NewPadded(split)
+	trashList, refreshTrash := a.projectTrashView()
+	trashBox := container.NewBorder(container.NewVBox(
+		container.NewBorder(nil, nil, bold("Project trash"), widget.NewButton("Refresh", refreshTrash)),
+		wrapLabel("Every project file a sync replaced or removed. Put back restores them where they were; nothing current is lost (it goes to the trash first).")),
+		nil, nil, nil, trashList)
+	return container.NewAppTabs(
+		container.NewTabItem("Lost chats", container.NewPadded(orphansBox)),
+		container.NewTabItem("Chat snapshots", container.NewPadded(snapsBox)),
+		container.NewTabItem("Project trash", container.NewPadded(trashBox)),
+	)
 }
 
 func (a *App) confirmUndo(s syncer.SnapshotInfo) {

@@ -23,6 +23,7 @@ import (
 	"github.com/Simplyph0/claudesync/internal/appcfg"
 	"github.com/Simplyph0/claudesync/internal/claude"
 	"github.com/Simplyph0/claudesync/internal/client"
+	"github.com/Simplyph0/claudesync/internal/projsync"
 	"github.com/Simplyph0/claudesync/internal/syncer"
 )
 
@@ -189,6 +190,13 @@ func (a *App) startEngine() error {
 	if err := e.Init(); err != nil {
 		return err
 	}
+	pm, err := projsync.Open(filepath.Join(appcfg.Dir(), "projects"))
+	if err != nil {
+		return err
+	}
+	pm.API, pm.Keys, pm.DeviceID, pm.DeviceName = e.API, projsync.NewKeys(a.sec.Key), c.DeviceID, c.DeviceName
+	pm.Settings, pm.Logf = projectSettings(c), a.log.Printf
+	e.ProjectSync = pm
 	a.mu.Lock()
 	a.eng = e
 	a.mu.Unlock()
@@ -243,6 +251,11 @@ func (a *App) applySettings(c appcfg.Settings) {
 		e.Scanner.Loc = claude.Detect(c.ClaudeHome, c.DesktopDir)
 		e.Scanner.Opt = scannerOptions(c)
 		e.Search = c.SearchRoots
+		if e.ProjectSync != nil {
+			e.ProjectSync.API = e.API
+			e.ProjectSync.Settings = projectSettings(c)
+			e.ProjectSync.DeviceName = c.DeviceName
+		}
 	})
 	select {
 	case a.resched <- struct{}{}:
@@ -289,6 +302,7 @@ func (a *App) doSync(manual bool) {
 		return
 	}
 	fyne.Do(func() { a.setTrayIcon(iconBusy) })
+	a.addDefaultProjects()
 	err := e.Sync(a.ctx)
 	a.afterRun("sync", err)
 	n := e.WaitingForApp()
@@ -455,6 +469,34 @@ func runScan() {
 				part = "  (earlier part of a chat still in Claude)"
 			}
 			fmt.Printf("  %s  %q  %s%s\n", o.Modified.Format("2006-01-02 15:04"), o.Title, o.Cwd, part)
+		}
+	}
+}
+
+func projectSettings(c appcfg.Settings) projsync.Settings {
+	return projsync.Settings{ClashPolicy: c.ClashPolicy, FirstLink: c.FirstLink, BigChange: c.BigChange, GitGuard: c.GitGuard,
+		RemoteDeletes: c.RemoteDeletes, MaxFileMB: c.MaxFileMB, MaxProjectMB: c.MaxProjectMB, TrashDays: c.TrashDays,
+		TrashGB: c.TrashGB, LANOnly: c.ProjectsLANOnly, UploadCapMB: c.UploadCapMB}
+}
+
+// addDefaultProjects applies the "new projects" setting to project folders
+// ClaudeSync hasn't seen before. Pushed git projects get at most the git default.
+func (a *App) addDefaultProjects() {
+	e := a.engine()
+	c := a.settings()
+	if e == nil || e.ProjectSync == nil || c.ProjectDefault == "" || c.ProjectDefault == projsync.ModeOff {
+		return
+	}
+	for key, folder := range e.KnownProjects() {
+		if _, ok := e.ProjectSync.Get(key); ok {
+			continue
+		}
+		mode := c.ProjectDefault
+		if mode == projsync.ModeSync && projsync.HasGitRemote(folder) && c.ProjectGitDefault != projsync.ModeSync {
+			mode = c.ProjectGitDefault
+		}
+		if err := e.ProjectSync.SetProject(projsync.Project{Key: key, Name: filepath.Base(folder), Folder: folder, Mode: mode}); err == nil {
+			a.log.Printf("project %s set to %s (your default for new projects)", filepath.Base(folder), mode)
 		}
 	}
 }

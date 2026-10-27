@@ -36,6 +36,21 @@ type Settings struct {
 	SearchRoots []string `json:"searchRoots"`
 
 	StartAtLogin bool `json:"startAtLogin"`
+
+	// Project folders (see docs/PROJECT_SYNC.md).
+	ProjectDefault    string `json:"projectDefault"`    // new projects: off / backup / sync
+	ProjectGitDefault string `json:"projectGitDefault"` // the most a pushed git project gets by default
+	ClashPolicy       string `json:"clashPolicy"`       // keep-both / newest / ask
+	FirstLink         string `json:"firstLink"`         // ask / merge / server / local
+	BigChange         string `json:"bigChange"`         // ask / continue
+	GitGuard          string `json:"gitGuard"`          // ask / sync / skip
+	RemoteDeletes     string `json:"remoteDeletes"`     // trash / ask
+	MaxFileMB         int    `json:"maxFileMb"`
+	MaxProjectMB      int    `json:"maxProjectMb"`
+	TrashDays         int    `json:"trashDays"`
+	TrashGB           int    `json:"trashGb"`
+	ProjectsLANOnly   bool   `json:"projectsLanOnly"`
+	UploadCapMB       int    `json:"uploadCapMb"`
 }
 
 // Secrets live in the OS keychain when there is one, else in a 0600 file.
@@ -58,6 +73,8 @@ func Defaults() Settings {
 		DeviceName: host, BackupMinutes: 30, RestoreMinutes: 30,
 		Sessions: true, Config: true, Memory: true, Scratch: true, ScratchMaxMB: 200,
 		SearchRoots: roots, StartAtLogin: true,
+		ProjectDefault: "off", ProjectGitDefault: "backup", ClashPolicy: "keep-both", FirstLink: "ask", BigChange: "ask",
+		GitGuard: "ask", RemoteDeletes: "trash", MaxFileMB: 200, MaxProjectMB: 2048, TrashDays: 30, TrashGB: 5,
 	}
 }
 

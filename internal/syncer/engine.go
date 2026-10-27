@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Simplyph0/claudesync/internal/client"
+	"github.com/Simplyph0/claudesync/internal/projsync"
 	"github.com/Simplyph0/claudesync/internal/proto"
 )
 
@@ -101,7 +102,8 @@ type Engine struct {
 	Scanner     *Scanner
 	StatePath   string
 	SnapshotDir string
-	Search      []string // folders searched for projects
+	Search      []string          // folders searched for projects
+	ProjectSync *projsync.Manager // project folders; nil if not used
 	Logf        func(format string, args ...any)
 	Notify      func(title, body string)
 	OnChange    func()
@@ -111,6 +113,7 @@ type Engine struct {
 	st           *State
 	status       Status
 	repairedUpTo time.Time
+	projectDirs  []string // project folders local sessions use (from the last scan)
 }
 
 func (e *Engine) Init() error {
@@ -368,10 +371,20 @@ func (e *Engine) sync(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(berr, err)
 	}
+	// Project folders sync before sessions, so a restored chat finds its code.
+	if e.ProjectSync != nil {
+		if err := e.ProjectSync.SyncAll(ctx); err != nil {
+			e.logf("project folders: %v", err)
+		}
+	}
+
 	scan, err := e.Scanner.Scan()
 	if err != nil {
 		return err
 	}
+	e.mu.Lock()
+	e.projectDirs = scan.ProjectDirs
+	e.mu.Unlock()
 
 	// Work out what this PC is missing or behind on.
 	e.mu.Lock()
@@ -888,6 +901,21 @@ func (e *Engine) Skipped() map[string]string {
 	out := map[string]string{}
 	for k, v := range e.st.Skipped {
 		out[k] = v
+	}
+	return out
+}
+
+// KnownProjects lists project folders on this PC (project key -> folder):
+// ones local sessions use and ones mapped for sessions from other PCs.
+func (e *Engine) KnownProjects() map[string]string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := map[string]string{}
+	for _, d := range e.projectDirs {
+		out[DescribeProject(d).Key] = d
+	}
+	for k, d := range e.st.Projects {
+		out[k] = d
 	}
 	return out
 }
