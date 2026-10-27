@@ -18,15 +18,16 @@ import (
 
 // Why a restore is waiting.
 const (
-	WaitApp     = "app-running" // desktop app is open
-	WaitProject = "unmapped"    // project folder not found on this PC
-	WaitFormat  = "format"      // desktop session format not recognised
-	WaitError   = "error"       // last attempt failed; retried next time
+	WaitApp       = "app-running" // desktop app is open
+	WaitProject   = "unmapped"    // project folder not found on this PC
+	WaitFormat    = "format"      // desktop session format not recognised
+	WaitAmbiguous = "ambiguous"   // several Claude data folders; the user must pick one
+	WaitError     = "error"       // last attempt failed; retried next time
 )
 
 type ItemState struct {
 	Version int    `json:"v"`
-	Hash    string `json:"h"`
+	Hash    string `json:"h"` // portable hash of the copy on this PC at last sync; "" if it isn't here
 	Stamp   string `json:"s"`
 	Title   string `json:"t,omitempty"`
 }
@@ -37,11 +38,11 @@ type Pending struct {
 	Title   string           `json:"title,omitempty"`
 	Project *ProjectRef      `json:"project,omitempty"`
 	Detail  string           `json:"detail,omitempty"`
+	Missing bool             `json:"missing,omitempty"` // was on this PC, disappeared without being deleted in Claude
 }
 
 // State is this PC's sync bookkeeping, saved as JSON.
 type State struct {
-	Seq      int64                 `json:"seq"`
 	Items    map[string]*ItemState `json:"items"`
 	Projects map[string]string     `json:"projects"` // project key -> local folder
 	Pending  map[string]*Pending   `json:"pending"`
@@ -77,26 +78,31 @@ type Status struct {
 	Route                   string
 	Busy                    bool
 	Uploaded, Restored      int // in the last run
+	Healed                  int // sessions put back after disappearing, in the last run
 	Conflicts               int
 	Pending                 []Pending
 	FormatPaused            bool
+	Corrupt                 []string // desktop records Claude can't read
+	LastSnapshot            string
 }
 
 type Engine struct {
-	API       *client.Client
-	Key       []byte
-	DeviceID  string
-	Scanner   *Scanner
-	StatePath string
-	Search    []string // folders searched for projects
-	Logf      func(format string, args ...any)
-	Notify    func(title, body string)
-	OnChange  func()
+	API         *client.Client
+	Key         []byte
+	DeviceID    string
+	Scanner     *Scanner
+	StatePath   string
+	SnapshotDir string
+	Search      []string // folders searched for projects
+	Logf        func(format string, args ...any)
+	Notify      func(title, body string)
+	OnChange    func()
 
-	mu     sync.Mutex // guards st and status
-	run    sync.Mutex // one backup/restore at a time
-	st     *State
-	status Status
+	mu           sync.Mutex // guards st, status and repairedUpTo
+	run          sync.Mutex // one backup/restore at a time
+	st           *State
+	status       Status
+	repairedUpTo time.Time
 }
 
 func (e *Engine) Init() error {
@@ -173,6 +179,12 @@ func (e *Engine) logf(format string, args ...any) {
 	}
 }
 
+func (e *Engine) notify(title, body string) {
+	if e.Notify != nil {
+		e.Notify(title, body)
+	}
+}
+
 func (e *Engine) setBusy(b bool) {
 	e.mu.Lock()
 	e.status.Busy = b
@@ -191,6 +203,7 @@ func (e *Engine) setErr(err error) {
 }
 
 // Backup uploads every item that changed on this PC since it last synced.
+// It never removes anything from the server.
 func (e *Engine) Backup(ctx context.Context) error {
 	e.run.Lock()
 	defer e.run.Unlock()
@@ -208,17 +221,15 @@ func (e *Engine) backup(ctx context.Context) error {
 	}
 	uploaded, conflicts := 0, 0
 	var errs []error
-	keys := sortedKeys(scan.Items)
-	for _, k := range keys {
+	for _, k := range sortedKeys(scan.Items) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		l := scan.Items[k]
 		e.mu.Lock()
 		st := e.st.Items[k]
-		_, waiting := e.st.Pending[k]
 		e.mu.Unlock()
-		if waiting || (st != nil && st.Stamp == l.Stamp) {
+		if st != nil && st.Hash != "" && st.Stamp == l.Stamp {
 			continue
 		}
 		it, err := l.Build()
@@ -244,7 +255,7 @@ func (e *Engine) backup(ctx context.Context) error {
 		}
 		h, err := e.API.Put(ctx, l.Kind, l.ID, base, blob)
 		if errors.Is(err, client.ErrConflict) {
-			conflicts++ // changed elsewhere too; the next restore keeps both copies
+			conflicts++ // changed elsewhere too; the restore that follows keeps both copies
 			continue
 		}
 		if err != nil {
@@ -264,97 +275,161 @@ func (e *Engine) backup(ctx context.Context) error {
 	e.status.LastBackup = time.Now()
 	e.status.Uploaded = uploaded
 	e.status.FormatPaused = scan.UnknownFormat > 0
+	e.status.Corrupt = scan.Corrupt
 	saveErr := e.saveLocked()
 	e.mu.Unlock()
 	if uploaded > 0 {
 		e.logf("backup: uploaded %d item(s)", uploaded)
 	}
 	if conflicts > 0 {
-		e.logf("backup: %d item(s) also changed on another PC; resolving on next restore", conflicts)
+		e.logf("backup: %d item(s) also changed on another PC; keeping both copies", conflicts)
 	}
 	if scan.UnknownFormat > 0 {
 		e.logf("backup: %d desktop session record(s) in an unrecognised format were backed up as-is", scan.UnknownFormat)
 	}
+	if len(scan.Corrupt) > 0 {
+		e.logf("backup: %d desktop session record(s) aren't readable and weren't uploaded: %v", len(scan.Corrupt), scan.Corrupt)
+	}
 	return errors.Join(append(errs, saveErr)...)
 }
 
-// Restore fetches changes made on other PCs and applies what it can. With
-// appClosed set, the caller has already closed the desktop app.
-func (e *Engine) Restore(ctx context.Context, appClosed bool) error {
+// Sync is one full cycle: back up this PC, then restore from the server.
+// Nothing on this PC is replaced without being saved in a local snapshot
+// first, and nothing is ever deleted.
+func (e *Engine) Sync(ctx context.Context) error {
 	e.run.Lock()
 	defer e.run.Unlock()
 	e.setBusy(true)
 	defer e.setBusy(false)
-	err := e.restore(ctx, appClosed)
+	err := e.sync(ctx)
 	e.setErr(err)
 	return err
 }
 
-func (e *Engine) restore(ctx context.Context, appClosed bool) error {
-	e.mu.Lock()
-	since := e.st.Seq
-	e.mu.Unlock()
-	list, err := e.API.Changes(ctx, since)
-	if err != nil {
-		return err
-	}
-	e.mu.Lock()
-	for _, h := range list.Items {
-		if h.Device == e.DeviceID {
-			continue
-		}
-		if st := e.st.Items[h.Key()]; st != nil && st.Version >= h.Version {
-			continue
-		}
-		e.st.Pending[h.Key()] = &Pending{Header: h}
-	}
-	e.st.Seq = list.Seq
-	_ = e.saveLocked()
-	pending := make([]*Pending, 0, len(e.st.Pending))
-	for _, p := range e.st.Pending {
-		pending = append(pending, p)
-	}
-	e.mu.Unlock()
-	if len(pending) == 0 {
-		e.mu.Lock()
-		e.status.LastRestore = time.Now()
-		e.status.Restored = 0
-		e.mu.Unlock()
-		return nil
-	}
-	sort.Slice(pending, func(i, j int) bool { return pending[i].Header.Seq < pending[j].Header.Seq })
+// Restore is Sync; restoring always backs up first.
+func (e *Engine) Restore(ctx context.Context) error { return e.Sync(ctx) }
 
+// repair fixes files broken by ClaudeSync 0.1 (see Repair). It only runs
+// while Claude is closed, since Claude may be writing those files.
+func (e *Engine) repair() {
+	if e.Scanner.appRunning() {
+		return
+	}
+	started := time.Now()
+	roots := []string{e.Scanner.Loc.Home, e.Scanner.Loc.ClaudeHome, e.Scanner.Loc.DesktopDir}
+	e.mu.Lock()
+	for _, p := range e.st.Projects {
+		roots = append(roots, p)
+	}
+	since := e.repairedUpTo
+	e.mu.Unlock()
+	snap := NewSnapshot(e.SnapshotDir, "before repair")
+	fixed, err := e.Scanner.Repair(roots, since, snap)
+	if cerr := snap.Close(); cerr != nil {
+		err = errors.Join(err, cerr)
+	}
+	if err != nil {
+		e.logf("repair: %v", err)
+		return
+	}
+	e.mu.Lock()
+	e.repairedUpTo = started.Add(-time.Minute)
+	e.mu.Unlock()
+	if len(fixed) > 0 {
+		e.logf("repaired %d file(s) that ClaudeSync 0.1 had written with broken paths (originals saved in %s): %v", len(fixed), snap.Path(), fixed)
+	}
+}
+
+func (e *Engine) sync(ctx context.Context) error {
+	e.repair()
+	berr := e.backup(ctx)
+	if berr != nil {
+		e.logf("backup before restore: %v", berr)
+		if errors.Is(berr, client.ErrUnauthorized) {
+			return berr
+		}
+	}
+	list, err := e.API.Changes(ctx, 0)
+	if err != nil {
+		return errors.Join(berr, err)
+	}
 	scan, err := e.Scanner.Scan()
 	if err != nil {
 		return err
 	}
-	appRunning := !appClosed && claude.DesktopRunning()
+
+	// Work out what this PC is missing or behind on.
+	e.mu.Lock()
+	pending := map[string]*Pending{}
+	for _, h := range list.Items {
+		k := h.Key()
+		st := e.st.Items[k]
+		local := scan.Items[k]
+		if local == nil && h.Kind == proto.KindSession && scan.Deleted[h.ID] {
+			// deleted in Claude on this PC: don't bring it back
+			if st == nil || st.Version < h.Version || st.Hash != "" {
+				e.st.Items[k] = &ItemState{Version: h.Version}
+			}
+			continue
+		}
+		switch {
+		case st == nil || st.Version < h.Version:
+			pending[k] = &Pending{Header: h}
+		case local == nil && st.Hash != "":
+			pending[k] = &Pending{Header: h, Missing: true}
+		}
+		if old := e.st.Pending[k]; old != nil && pending[k] != nil {
+			pending[k].Title, pending[k].Project = old.Title, old.Project
+		}
+	}
+	e.st.Pending = pending
+	_ = e.saveLocked()
+	todo := make([]*Pending, 0, len(pending))
+	for _, p := range pending {
+		todo = append(todo, p)
+	}
+	e.mu.Unlock()
+	sort.Slice(todo, func(i, j int) bool { return todo[i].Header.Seq < todo[j].Header.Seq })
+
+	appRunning := e.Scanner.appRunning()
 	index := NewProjectIndex(e.Search, scan.ProjectDirs)
-	restored, conflicts := 0, 0
+	snap := e.newSnapshot("before restore", scan)
+	restored, healed, conflicts := 0, 0, 0
 	var errs []error
 	var fresh []string
-	for _, p := range pending {
+	for _, p := range todo {
 		if ctx.Err() != nil {
 			break
 		}
-		done, conflict, err := e.applyOne(ctx, p, scan, index, appRunning)
+		done, conflict, err := e.applyOne(ctx, p, scan, index, appRunning, snap)
 		if err != nil {
 			errs = append(errs, err)
 		}
-		if conflict {
+		switch {
+		case conflict:
 			conflicts++
-		} else if done {
+		case done:
 			fresh = append(fresh, p.Header.Key())
 		}
 		if done {
 			restored++
+			if p.Missing {
+				healed++
+			}
 		}
 	}
+	if err := snap.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("snapshot: %w", err))
+	}
 	e.rehash(fresh)
+
 	e.mu.Lock()
 	e.status.LastRestore = time.Now()
-	e.status.Restored = restored
+	e.status.Restored, e.status.Healed = restored, healed
 	e.status.Conflicts += conflicts
+	if snap.Count() > 0 {
+		e.status.LastSnapshot = snap.Path()
+	}
 	waitApp := 0
 	for _, p := range e.st.Pending {
 		if p.Reason == WaitApp {
@@ -363,20 +438,52 @@ func (e *Engine) restore(ctx context.Context, appClosed bool) error {
 	}
 	saveErr := e.saveLocked()
 	e.mu.Unlock()
+
+	if snap.Count() > 0 {
+		e.logf("saved %d file(s) to a snapshot before restoring: %s", snap.Count(), snap.Path())
+	}
 	if restored > 0 {
-		e.logf("restore: applied %d item(s) from other PCs", restored)
+		e.logf("restore: applied %d item(s)", restored)
 	}
-	if conflicts > 0 && e.Notify != nil {
-		e.Notify("ClaudeSync: kept both copies", fmt.Sprintf("%d session(s) changed on two PCs; the other PC's version was added as a separate session.", conflicts))
+	if healed > 0 {
+		e.logf("restore: put back %d session(s) that had disappeared from this PC", healed)
+		e.notify("ClaudeSync: sessions put back", fmt.Sprintf("%d session(s) had disappeared from this PC and were restored from your backups.", healed))
 	}
-	if waitApp > 0 && e.Notify != nil {
-		e.Notify("ClaudeSync: updates ready", fmt.Sprintf("%d session(s) from your other PCs are ready. Restart Claude to load them.", waitApp))
+	if conflicts > 0 {
+		e.notify("ClaudeSync: kept both copies", fmt.Sprintf("%d session(s) changed on two PCs; the other PC's version was added as a separate session.", conflicts))
+	}
+	if waitApp > 0 {
+		e.notify("ClaudeSync: updates ready", fmt.Sprintf("%d session(s) are ready. They load as soon as Claude is closed.", waitApp))
 	}
 	return errors.Join(append(errs, saveErr)...)
 }
 
-// applyOne restores one pending item. done means it no longer waits.
-func (e *Engine) applyOne(ctx context.Context, p *Pending, scan *ScanResult, index *ProjectIndex, appRunning bool) (done, conflict bool, err error) {
+// newSnapshot starts a snapshot that also records the whole desktop session
+// list the first time anything is written.
+func (e *Engine) newSnapshot(reason string, scan *ScanResult) *guardedSnapshot {
+	return &guardedSnapshot{Snapshot: NewSnapshot(e.SnapshotDir, reason), sessions: e.Scanner.Loc.SessionsDir()}
+}
+
+type guardedSnapshot struct {
+	*Snapshot
+	sessions string
+	primed   bool
+}
+
+// prime saves the full session list before the first change.
+func (g *guardedSnapshot) prime() error {
+	if g.primed {
+		return nil
+	}
+	g.primed = true
+	if g.sessions == "" {
+		return nil
+	}
+	return g.AddTree(g.sessions)
+}
+
+// applyOne restores one item. done means it no longer waits.
+func (e *Engine) applyOne(ctx context.Context, p *Pending, scan *ScanResult, index *ProjectIndex, appRunning bool, snap *guardedSnapshot) (done, conflict bool, err error) {
 	h := p.Header
 	key := h.Key()
 	wait := func(reason, detail string) (bool, bool, error) {
@@ -412,17 +519,23 @@ func (e *Engine) applyOne(ctx context.Context, p *Pending, scan *ScanResult, ind
 		wait(WaitError, err.Error())
 		return false, false, fmt.Errorf("open %s: %w", key, err)
 	}
+	if it.M.UnknownFormat {
+		// An older ClaudeSync uploaded an unreadable copy over this session;
+		// use the newest readable version from the history instead.
+		if good := e.newestReadable(ctx, h.Kind, h.ID); good != nil {
+			it = good
+		}
+	}
 	e.mu.Lock()
 	p.Title, p.Project = it.M.Title, it.M.Project
 	e.mu.Unlock()
 
-	if h.Kind == proto.KindSession && e.Scanner.Loc.SessionsDir() != "" {
+	if h.Kind == proto.KindSession {
 		if it.M.UnknownFormat || it.M.Format > FormatVersion || scan.UnknownFormat > 0 {
 			return wait(WaitFormat, "Claude's session format changed; desktop restores are paused until ClaudeSync is updated")
 		}
-		if scan.Deleted[it.M.DesktopID] {
-			finish(&ItemState{Version: hdr.Version}) // deleted on this PC: don't bring it back
-			return false, false, nil
+		if e.Scanner.Loc.Ambiguous {
+			return wait(WaitAmbiguous, "")
 		}
 		if appRunning {
 			return wait(WaitApp, "")
@@ -455,6 +568,10 @@ func (e *Engine) applyOne(ctx context.Context, p *Pending, scan *ScanResult, ind
 	if err != nil {
 		return wait(WaitError, err.Error())
 	}
+	if err := snap.prime(); err != nil {
+		wait(WaitError, err.Error())
+		return false, false, fmt.Errorf("couldn't take a snapshot, so nothing was changed: %w", err)
+	}
 
 	// Did this item also change here since the last sync?
 	e.mu.Lock()
@@ -462,42 +579,63 @@ func (e *Engine) applyOne(ctx context.Context, p *Pending, scan *ScanResult, ind
 	e.mu.Unlock()
 	if local := scan.Items[key]; local != nil {
 		li, err := local.Build()
-		if err == nil {
-			lh := li.Hash()
-			if lh == it.Hash() {
-				finish(&ItemState{Version: hdr.Version, Hash: lh, Stamp: local.Stamp, Title: local.Title})
-				return true, false, nil
-			}
-			if st == nil || lh != st.Hash {
-				if h.Kind != proto.KindSession {
-					// settings/memory: the newer version wins, the older stays in server history
-					e.logf("%s changed on this PC and on %s; using %s's version (older one kept in history)", it.M.Title, hdr.DeviceName, hdr.DeviceName)
-				} else {
-					cp, err := AsCopy(it, hdr.DeviceName)
-					if err != nil {
-						return wait(WaitError, err.Error())
-					}
-					if err := e.Scanner.Write(cp, t); err != nil {
-						return wait(WaitError, err.Error())
-					}
-					// keep the local copy as-is; it uploads over the server's next backup
-					old := ""
-					if st != nil {
-						old = st.Hash
-					}
-					finish(&ItemState{Version: hdr.Version, Hash: old, Title: local.Title})
-					e.logf("conflict on %q: kept this PC's copy and added %q", it.M.Title, cp.M.Title)
-					return true, true, nil
+		if err != nil {
+			return wait(WaitError, err.Error())
+		}
+		lh := li.Hash()
+		if lh == it.Hash() {
+			finish(&ItemState{Version: hdr.Version, Hash: lh, Stamp: local.Stamp, Title: local.Title})
+			return true, false, nil
+		}
+		if st == nil || lh != st.Hash {
+			if h.Kind == proto.KindSession {
+				cp, err := AsCopy(it, hdr.DeviceName)
+				if err != nil {
+					return wait(WaitError, err.Error())
 				}
+				if err := e.Scanner.Write(cp, t, snap.Snapshot); err != nil {
+					return wait(WaitError, err.Error())
+				}
+				// This PC's copy stays as it is and uploads at the next backup.
+				old := ""
+				if st != nil {
+					old = st.Hash
+				}
+				finish(&ItemState{Version: hdr.Version, Hash: old, Title: local.Title})
+				e.logf("conflict on %q: kept this PC's copy and added %q", it.M.Title, cp.M.Title)
+				return true, true, nil
 			}
+			// settings/memory: the newer version wins; this PC's copy is in the snapshot and server history
+			e.logf("%s changed here and on %s; using %s's version (this PC's copy is in the snapshot)", it.M.Title, hdr.DeviceName, hdr.DeviceName)
 		}
 	}
 
-	if err := e.Scanner.Write(it, t); err != nil {
+	if err := e.Scanner.Write(it, t, snap.Snapshot); err != nil {
 		return wait(WaitError, err.Error())
+	}
+	if p.Missing {
+		e.logf("put back %q, which had disappeared from this PC", it.M.Title)
 	}
 	finish(&ItemState{Version: hdr.Version, Title: it.M.Title}) // hash filled in by rehash
 	return true, false, nil
+}
+
+func (e *Engine) newestReadable(ctx context.Context, kind, id string) *Item {
+	vs, err := e.API.Versions(ctx, kind, id)
+	if err != nil {
+		return nil
+	}
+	sort.Slice(vs, func(i, j int) bool { return vs[i].Version > vs[j].Version })
+	for _, v := range vs {
+		_, blob, err := e.API.Get(ctx, kind, id, v.Version)
+		if err != nil {
+			continue
+		}
+		if it, err := Unseal(blob, e.Key, kind, id); err == nil && !it.M.UnknownFormat {
+			return it
+		}
+	}
+	return nil
 }
 
 // rehash records the on-disk hash of freshly restored items so the next
@@ -550,26 +688,26 @@ func (e *Engine) WaitingForApp() int {
 	return n
 }
 
-// RestartAndApply closes the desktop app, applies waiting restores and opens
-// the app again.
-func (e *Engine) RestartAndApply(ctx context.Context) error {
-	apps, err := claude.CloseDesktop(15 * time.Second)
+// CloseAndApply asks Claude to quit normally (never force-closes it), waits
+// for it to exit, applies waiting restores, then opens Claude again.
+func (e *Engine) CloseAndApply(ctx context.Context) error {
+	apps, err := claude.CloseDesktop(30 * time.Second)
 	if err != nil {
 		return err
 	}
-	rerr := e.Restore(ctx, true)
+	serr := e.Sync(ctx)
 	if err := claude.Relaunch(apps); err != nil {
-		return errors.Join(rerr, fmt.Errorf("reopen Claude: %w", err))
+		return errors.Join(serr, fmt.Errorf("couldn't reopen Claude (open it yourself): %w", err))
 	}
-	return rerr
+	return serr
 }
 
 // ErrCloseApp means the desktop app must be closed for this action.
 var ErrCloseApp = errors.New("close the Claude app first")
 
 // RestoreVersion writes an older server version of an item over this PC's
-// copy. The next backup then uploads it as the newest version, so every PC
-// rolls back.
+// copy (saving the current copy in a snapshot first). The next backup
+// uploads it as the newest version, so every PC rolls back.
 func (e *Engine) RestoreVersion(ctx context.Context, kind, id string, version int) error {
 	e.run.Lock()
 	defer e.run.Unlock()
@@ -581,7 +719,7 @@ func (e *Engine) RestoreVersion(ctx context.Context, kind, id string, version in
 	if err != nil {
 		return err
 	}
-	if kind == proto.KindSession && e.Scanner.Loc.SessionsDir() != "" && claude.DesktopRunning() {
+	if kind == proto.KindSession && e.Scanner.Loc.SessionsDir() != "" && e.Scanner.appRunning() {
 		return ErrCloseApp
 	}
 	project := ""
@@ -594,11 +732,27 @@ func (e *Engine) RestoreVersion(ctx context.Context, kind, id string, version in
 	if err != nil {
 		return err
 	}
-	if err := e.Scanner.Write(it, t); err != nil {
+	snap := NewSnapshot(e.SnapshotDir, "before rollback")
+	werr := e.Scanner.Write(it, t, snap)
+	if err := errors.Join(werr, snap.Close()); err != nil {
 		return err
 	}
 	e.logf("rolled %s back to version %d", it.M.Title, version)
 	return nil
+}
+
+// UndoSnapshot puts back the files saved in a snapshot. Claude must be closed.
+func (e *Engine) UndoSnapshot(path string) (int, error) {
+	e.run.Lock()
+	defer e.run.Unlock()
+	if e.Scanner.appRunning() {
+		return 0, ErrCloseApp
+	}
+	n, err := RestoreSnapshot(path, e.SnapshotDir)
+	if n > 0 {
+		e.logf("put back %d file(s) from snapshot %s", n, filepath.Base(path))
+	}
+	return n, err
 }
 
 // Known lists items this PC has synced, for the history view.

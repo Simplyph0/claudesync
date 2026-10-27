@@ -49,14 +49,15 @@ func (s *Scanner) Resolve(m Manifest, project string) (Target, error) {
 	}
 	t.roots = append(t.roots, Root{"DESKTOP", desktop}, Root{"CLAUDE", s.Loc.ClaudeHome}, Root{"HOME", s.Loc.Home})
 	if m.Cwd != "" {
-		t.Cwd = filepath.Clean(Localize(m.Cwd, t.roots))
+		t.Cwd = filepath.Clean(Localize(m.Cwd, t.roots, false))
 	}
 	return t, nil
 }
 
 // Write puts an item's files in place on this PC. Desktop records are only
-// written when this PC has the desktop app.
-func (s *Scanner) Write(it *Item, t Target) error {
+// written when this PC has the desktop app. Every file it replaces is first
+// saved in snap; if that fails, the file is left alone.
+func (s *Scanner) Write(it *Item, t Target, snap *Snapshot) error {
 	var errs []error
 	for _, f := range it.Files {
 		dst, err := s.destination(it, t, f)
@@ -69,13 +70,33 @@ func (s *Scanner) Write(it *Item, t Target) error {
 		}
 		data := f.Data
 		if isText(f.Role, data) {
-			data = []byte(Localize(string(data), t.roots))
+			data = []byte(Localize(string(data), t.roots, isJSONFile(f.Role, f.Rel)))
+		}
+		if old, err := os.ReadFile(dst); err == nil {
+			if bytes.Equal(old, data) {
+				continue
+			}
+			if err := snap.AddFile(dst); err != nil {
+				errs = append(errs, fmt.Errorf("not replacing %s: couldn't save a copy first: %w", dst, err))
+				continue
+			}
 		}
 		if err := writeAtomic(dst, data); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Destinations lists where an item's files would go on this PC.
+func (s *Scanner) Destinations(it *Item, t Target) []string {
+	var out []string
+	for _, f := range it.Files {
+		if dst, err := s.destination(it, t, f); err == nil && dst != "" {
+			out = append(out, dst)
+		}
+	}
+	return out
 }
 
 func (s *Scanner) destination(it *Item, t Target, f File) (string, error) {

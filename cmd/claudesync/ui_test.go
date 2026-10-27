@@ -64,7 +64,7 @@ func TestScreens(t *testing.T) {
 	save("setup", a.setupUI())
 	save("passphrase", a.passphraseUI(a.cfg, cl, "", true))
 	tabs := a.mainUI().(*container.AppTabs)
-	for i, name := range []string{"status", "projects", "history", "settings", "server", "log"} {
+	for i, name := range []string{"status", "projects", "history", "settings", "recover", "server", "log"} {
 		fyne.DoAndWait(func() { tabs.SelectIndex(i) })
 		save("tab-"+name, tabs)
 	}

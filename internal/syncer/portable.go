@@ -20,8 +20,8 @@ var variantSuffixes = []string{"", "_J", "_F", "_E"}
 
 func variant(p, suffix string) string {
 	switch suffix {
-	case "_J": // inside JSON strings, backslashes are escaped
-		return strings.ReplaceAll(p, `\`, `\\`)
+	case "_J": // inside JSON strings, backslashes and quotes are escaped
+		return jsonEscape(p)
 	case "_F":
 		return strings.ReplaceAll(p, `\`, `/`)
 	case "_E": // ~/.claude/projects folder name
@@ -86,9 +86,15 @@ func isAlnum(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
+func jsonEscape(p string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(p)
+}
+
 // Localize expands placeholders using this PC's paths. Roots with the same
-// name keep the first one.
-func Localize(text string, roots []Root) string {
+// name keep the first one. In JSON files every path is written escaped:
+// on Linux a plain path and a JSON path look the same, so a plain {{NAME}}
+// from a Linux PC may sit inside a JSON string.
+func Localize(text string, roots []Root, inJSON bool) string {
 	if !strings.Contains(text, "{{") {
 		return text
 	}
@@ -100,8 +106,18 @@ func Localize(text string, roots []Root) string {
 		}
 		done[r.Name] = true
 		for _, s := range variantSuffixes {
-			args = append(args, placeholder(r.Name, s), variant(r.Path, s))
+			v := variant(r.Path, s)
+			if inJSON && s == "" {
+				v = jsonEscape(r.Path)
+			}
+			args = append(args, placeholder(r.Name, s), v)
 		}
 	}
 	return strings.NewReplacer(args...).Replace(text)
+}
+
+// isJSONFile says whether a synced file is JSON (desktop records,
+// transcripts and their side files).
+func isJSONFile(role, rel string) bool {
+	return role == RoleDesktop || strings.HasSuffix(rel, ".json") || strings.HasSuffix(rel, ".jsonl")
 }

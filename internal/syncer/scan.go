@@ -45,7 +45,8 @@ func (l *Local) Build() (*Item, error) { return l.build() }
 // ScanResult is everything found in one pass.
 type ScanResult struct {
 	Items         map[string]*Local
-	UnknownFormat int             // desktop records ClaudeSync doesn't understand
+	UnknownFormat int             // valid desktop records ClaudeSync doesn't understand (a format change)
+	Corrupt       []string        // desktop records that aren't valid JSON
 	Deleted       map[string]bool // desktop session ids the app marked deleted
 	ProjectDirs   []string        // project folders used by local sessions
 }
@@ -53,6 +54,15 @@ type ScanResult struct {
 type Scanner struct {
 	Loc claude.Locations
 	Opt Options
+	// AppRunning reports whether the desktop app is open (tests replace it).
+	AppRunning func() bool
+}
+
+func (s *Scanner) appRunning() bool {
+	if s.AppRunning != nil {
+		return s.AppRunning()
+	}
+	return claude.DesktopRunning()
 }
 
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F-]{36}$`)
@@ -67,6 +77,7 @@ type desktopRecord struct {
 	anchor    string
 	title     string
 	known     bool
+	corrupt   bool // not valid JSON
 }
 
 func readDesktopRecord(path, rel string) (*desktopRecord, error) {
@@ -77,6 +88,7 @@ func readDesktopRecord(path, rel string) (*desktopRecord, error) {
 	r := &desktopRecord{path: path, rel: rel, raw: raw}
 	var m map[string]any
 	if json.Unmarshal(raw, &m) != nil {
+		r.corrupt = true
 		return r, nil
 	}
 	str := func(k string) string { s, _ := m[k].(string); return s }
@@ -117,6 +129,11 @@ func (s *Scanner) Scan() (*ScanResult, error) {
 		res.Deleted = deleted
 		for _, r := range recs {
 			if !r.known {
+				if r.corrupt {
+					// never upload an unreadable file over the good copy on the server
+					res.Corrupt = append(res.Corrupt, r.path)
+					continue
+				}
 				res.UnknownFormat++
 				l := s.unknownRecord(r)
 				res.Items[l.Key()] = l
@@ -315,14 +332,13 @@ func (s *Scanner) sessionLocal(r *desktopRecord, cli, tdir, cwd string) *Local {
 	}}
 }
 
-// unknownRecord backs up a desktop record ClaudeSync can't parse, untouched.
+// unknownRecord backs up a desktop record in a format ClaudeSync doesn't
+// know, untouched, under its own id so it never replaces the readable
+// version of that session on the server.
 func (s *Scanner) unknownRecord(r *desktopRecord) *Local {
 	base := strings.TrimSuffix(filepath.Base(r.path), ".json")
-	id := base
-	if !proto.ValidID(id) {
-		sum := sha256.Sum256([]byte(r.rel))
-		id = "raw_" + hex.EncodeToString(sum[:12])
-	}
+	sum := sha256.Sum256([]byte(r.rel))
+	id := "raw_" + hex.EncodeToString(sum[:12])
 	return &Local{Kind: proto.KindSession, ID: id, Title: base, Stamp: stamp(r.path), build: func() (*Item, error) {
 		return &Item{M: Manifest{Format: FormatVersion, Kind: proto.KindSession, ID: id, Title: base, Device: s.Opt.DeviceName, UnknownFormat: true},
 			Files: []File{{RoleDesktop, r.rel, r.raw}}}, nil

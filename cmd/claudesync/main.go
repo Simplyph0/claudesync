@@ -129,8 +129,8 @@ func (a *App) setupTray() {
 		fyne.NewMenuItem("Open ClaudeSync", a.showWindow),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Back up now", func() { go a.doBackup() }),
-		fyne.NewMenuItem("Restore now", func() { go a.doRestore(true) }),
-		fyne.NewMenuItem("Restart Claude && apply updates", func() { go a.restartApply() }),
+		fyne.NewMenuItem("Sync now", func() { go a.doSync(true) }),
+		fyne.NewMenuItem("Close Claude and load updates", func() { go a.closeAndApply() }),
 	)
 	desk.SetSystemTrayMenu(a.trayMenu)
 	desk.SetSystemTrayIcon(iconIdle)
@@ -167,14 +167,15 @@ func (a *App) startEngine() error {
 	c := a.settings()
 	loc := claude.Detect(c.ClaudeHome, c.DesktopDir)
 	e := &syncer.Engine{
-		API:       client.New(c.LANURL, c.TunnelURL, c.Pin, a.sec.Token),
-		Key:       a.sec.Key,
-		DeviceID:  c.DeviceID,
-		Scanner:   &syncer.Scanner{Loc: loc, Opt: scannerOptions(c)},
-		StatePath: filepath.Join(appcfg.Dir(), "state.json"),
-		Search:    c.SearchRoots,
-		Logf:      a.log.Printf,
-		Notify:    a.notify,
+		API:         client.New(c.LANURL, c.TunnelURL, c.Pin, a.sec.Token),
+		Key:         a.sec.Key,
+		DeviceID:    c.DeviceID,
+		Scanner:     &syncer.Scanner{Loc: loc, Opt: scannerOptions(c)},
+		StatePath:   filepath.Join(appcfg.Dir(), "state.json"),
+		SnapshotDir: snapshotDir(),
+		Search:      c.SearchRoots,
+		Logf:        a.log.Printf,
+		Notify:      a.notify,
 		OnChange: func() {
 			fyne.Do(func() {
 				if a.refreshUI != nil {
@@ -190,8 +191,28 @@ func (a *App) startEngine() error {
 	a.eng = e
 	a.mu.Unlock()
 	a.log.Printf("ClaudeSync started. Claude data: %s; desktop app data: %s", loc.ClaudeHome, orNone(loc.DesktopDir))
-	a.schedOnce.Do(func() { go a.scheduler() })
+	if loc.Ambiguous {
+		a.log.Printf("several Claude data folders found (%v); desktop sessions won't be restored until you pick one in Settings", loc.Candidates)
+	}
+	a.schedOnce.Do(func() {
+		go a.scheduler()
+		go a.watchAppClose()
+	})
 	return nil
+}
+
+func snapshotDir() string { return filepath.Join(appcfg.Dir(), "snapshots") }
+
+// watchAppClose applies waiting updates as soon as Claude is closed, however
+// it was closed.
+func (a *App) watchAppClose() {
+	for range time.Tick(15 * time.Second) {
+		e := a.engine()
+		if e != nil && e.WaitingForApp() > 0 && !claude.DesktopRunning() {
+			a.log.Printf("Claude is closed; loading the waiting updates")
+			a.doSync(false)
+		}
+	}
 }
 
 func orNone(s string) string {
@@ -222,15 +243,16 @@ func (a *App) applySettings(c appcfg.Settings) {
 	}
 }
 
-// scheduler runs restores and backups on their own intervals. A restore
-// runs soon after start so a PC you sit back down at catches up first.
+// scheduler runs syncs (backup, then restore) and plain backups on their own
+// intervals. A sync runs soon after start so a PC you sit back down at
+// catches up, always backing up its own sessions first.
 func (a *App) scheduler() {
-	restoreT := time.NewTimer(5 * time.Second)
-	backupT := time.NewTimer(30 * time.Second)
+	restoreT := time.NewTimer(10 * time.Second)
+	backupT := time.NewTimer(time.Duration(a.settings().BackupMinutes) * time.Minute)
 	for {
 		select {
 		case <-restoreT.C:
-			a.doRestore(false)
+			a.doSync(false)
 			restoreT.Reset(time.Duration(a.settings().RestoreMinutes) * time.Minute)
 		case <-backupT.C:
 			a.doBackup()
@@ -252,16 +274,16 @@ func (a *App) doBackup() {
 	a.afterRun("backup", err)
 }
 
-// doRestore pulls changes; if sessions are waiting for Claude to close it
-// asks once per new batch whether to restart Claude.
-func (a *App) doRestore(manual bool) {
+// doSync backs up, then restores; if sessions are waiting for Claude to
+// close it asks once per new batch.
+func (a *App) doSync(manual bool) {
 	e := a.engine()
 	if e == nil {
 		return
 	}
 	fyne.Do(func() { a.setTrayIcon(iconBusy) })
-	err := e.Restore(a.ctx, false)
-	a.afterRun("restore", err)
+	err := e.Sync(a.ctx)
+	a.afterRun("sync", err)
 	n := e.WaitingForApp()
 	a.mu.Lock()
 	ask := n > 0 && (manual || n > a.lastAsked)
@@ -286,27 +308,36 @@ func (a *App) afterRun(what string, err error) {
 
 func (a *App) askRestart(n int) {
 	a.showWindow()
-	msg := fmt.Sprintf("%d session(s) from your other PCs are ready.\n\nClaude has to close for a moment to load them; it reopens straight after.\nRestart Claude now?", n)
+	msg := fmt.Sprintf("%d session(s) from your other PCs are ready.\n\n"+
+		"They load the next time Claude is closed: quit it whenever suits you, and ClaudeSync adds them straight away. "+
+		"This PC's own sessions are already backed up, and anything replaced is saved in a snapshot first.\n\n"+
+		"Close Claude now and reopen it with the updates?", n)
 	dialog.ShowConfirm("Updates ready", msg, func(ok bool) {
 		if ok {
-			go a.restartApply()
+			go a.closeAndApply()
 		}
 	}, a.win)
 }
 
-func (a *App) restartApply() {
+// closeAndApply asks Claude to quit normally, loads the updates, and reopens it.
+func (a *App) closeAndApply() {
 	e := a.engine()
 	if e == nil {
 		return
 	}
 	fyne.Do(func() { a.setTrayIcon(iconBusy) })
-	err := e.RestartAndApply(a.ctx)
-	a.afterRun("restart and apply", err)
+	err := e.CloseAndApply(a.ctx)
+	if errors.Is(err, claude.ErrStillRunning) {
+		a.afterRun("close Claude", nil)
+		fyne.Do(func() { dialog.ShowInformation("Claude is still open", err.Error(), a.win) })
+		return
+	}
+	a.afterRun("close and load updates", err)
 	if err == nil {
 		a.mu.Lock()
 		a.lastAsked = 0
 		a.mu.Unlock()
-		a.notify("ClaudeSync", "Claude restarted with your latest sessions.")
+		a.notify("ClaudeSync", "Claude reopened with your latest sessions.")
 	} else {
 		fyne.Do(func() { dialog.ShowError(err, a.win) })
 	}
@@ -320,6 +351,12 @@ func runScan() {
 	fmt.Println("Desktop app data:", orNone(loc.DesktopDir))
 	for _, alt := range loc.DesktopAlt {
 		fmt.Println("  also known as:", alt)
+	}
+	if len(loc.Candidates) > 1 {
+		fmt.Println("Folders with desktop sessions:", loc.Candidates)
+		if loc.Ambiguous {
+			fmt.Println("  more than one! Pick the right one in Settings before restoring.")
+		}
 	}
 	fmt.Println("Desktop app running:", claude.DesktopRunning())
 	sc := &syncer.Scanner{Loc: loc, Opt: scannerOptions(c)}
@@ -353,4 +390,14 @@ func runScan() {
 		fmt.Printf("%-8s %-44s %4d files %7d KB  %q%s cwd=%s\n", l.Kind, l.ID, len(it.Files), size>>10, l.Title, proj, it.M.Cwd)
 	}
 	fmt.Printf("%d items; %d unrecognised desktop records; %d deleted markers\n", len(res.Items), res.UnknownFormat, len(res.Deleted))
+	if orphans, err := sc.Orphans(); err == nil && len(orphans) > 0 {
+		fmt.Printf("\n%d conversation(s) on disk aren't in Claude's sidebar (recoverable in the Recover tab):\n", len(orphans))
+		for _, o := range orphans {
+			part := ""
+			if o.PartOf != "" {
+				part = "  (earlier part of a chat still in Claude)"
+			}
+			fmt.Printf("  %s  %q  %s%s\n", o.Modified.Format("2006-01-02 15:04"), o.Title, o.Cwd, part)
+		}
+	}
 }

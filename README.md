@@ -88,11 +88,21 @@ reset.** If it's lost, existing backups can't be decrypted.
 
 After setup ClaudeSync lives in the tray:
 
-- **Backs up** every 30 minutes and **checks for updates** every 30 minutes.
-  The two intervals are set separately in Settings.
-- **Restores right after start-up**, so a PC you come back to catches up first.
-- **If Claude is open** when sessions from another PC arrive, it asks before
-  restarting Claude to load them. If Claude is closed, it applies them straight away.
+- **Backs up** every 30 minutes and **syncs** every 30 minutes. The two intervals
+  are set separately in Settings.
+- **Every sync backs up this PC first**, then loads what's new from your other PCs.
+  It also syncs right after start-up, so a PC you come back to catches up.
+- **Nothing is overwritten without a copy.** Before ClaudeSync replaces any file,
+  it saves the current version in a local snapshot. The **Recover** tab puts any
+  snapshot back. ClaudeSync never deletes anything, here or on the server.
+- **Chats that vanish come back.** If a session that was backed up disappears from a
+  PC without being deleted in Claude, the next sync restores it. Sessions you delete
+  in Claude stay deleted on that PC.
+- **If Claude is open**, updates wait. They load the moment Claude is closed, however
+  you close it. ClaudeSync can also ask Claude to quit, but it never force-closes it.
+- **Recover lost chats.** If a conversation is still on disk but missing from Claude's
+  sidebar, the **Recover** tab lists it and can add it back. Earlier parts of chats you
+  still have are marked, so you don't get duplicates.
 - **If the same session changed on two PCs**, it keeps both. The other PC's version
   appears as a separate session named "… (from Laptop)".
 - **Projects** are matched by git remote, then by folder name. Anything it can't find
@@ -115,11 +125,18 @@ that PC without uploading anything.
 - **Deleting a session doesn't spread to other PCs.** It also won't be brought back
   on the PC where you deleted it, unless it changes again elsewhere.
 - **Worktree sessions** resume in the main project folder on other PCs.
-- **Restarting Claude to apply updates** closes it gracefully. If it is still
-  running after 15 seconds (for example, minimised to the tray), it is force-closed.
 - **Linux** has no official desktop app. ClaudeSync looks for community builds in
-  `~/.config/Claude` and `~/.config/claude-desktop`; set the folder in Settings if
-  yours is elsewhere.
+  `~/.config/Claude`, `~/.config/claude-desktop`, Flatpak and Snap folders. If it finds
+  more than one with sessions, it won't load updates into either until you pick the
+  right one in Settings.
+
+## Upgrading from 0.1
+
+0.1 had two serious bugs: sessions restored from Linux onto Windows got paths Claude
+couldn't read, and an unreadable record could replace the good copy on the server.
+0.2 repairs files already affected (saving the originals in a snapshot first),
+never uploads unreadable records, and restores the newest *readable* version from
+the server's history.
 
 ## Building
 

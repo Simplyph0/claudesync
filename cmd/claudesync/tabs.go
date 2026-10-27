@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Simplyph0/claudesync/internal/appcfg"
 	"github.com/Simplyph0/claudesync/internal/autostart"
+	"github.com/Simplyph0/claudesync/internal/claude"
 	"github.com/Simplyph0/claudesync/internal/client"
 	"github.com/Simplyph0/claudesync/internal/proto"
 	"github.com/Simplyph0/claudesync/internal/syncer"
@@ -37,6 +39,7 @@ func (a *App) mainUI() fyne.CanvasObject {
 		container.NewTabItem("Projects", projectsTab),
 		container.NewTabItem("History", a.historyTab()),
 		container.NewTabItem("Settings", a.settingsTab()),
+		container.NewTabItem("Recover", a.recoverTab()),
 		container.NewTabItem("Server", a.serverTab()),
 		container.NewTabItem("Log", logTab),
 	)
@@ -67,12 +70,13 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 	errLbl.Importance = widget.DangerImportance
 	banner := wrapLabel("")
 	banner.Importance = widget.WarningImportance
-	restartBtn := widget.NewButton("Restart Claude and load them", func() { go a.restartApply() })
+	restartBtn := widget.NewButton("Close Claude and load them", func() { go a.closeAndApply() })
 	restartBtn.Importance = widget.HighImportance
 	bannerBox := container.NewVBox(banner, restartBtn)
+	safety := widget.NewLabel("")
 
 	backupBtn := widget.NewButton("Back up now", func() { go a.doBackup() })
-	restoreBtn := widget.NewButton("Restore now", func() { go a.doRestore(true) })
+	restoreBtn := widget.NewButton("Sync now", func() { go a.doSync(true) })
 
 	var pending []syncer.Pending
 	list := widget.NewList(func() int { return len(pending) },
@@ -84,13 +88,18 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 				title = p.Header.Kind + " " + p.Header.ID
 			}
 			why := map[string]string{
-				syncer.WaitApp:     "waiting for Claude to restart",
-				syncer.WaitProject: "project folder not found here (see Projects)",
-				syncer.WaitFormat:  "paused: Claude's session format changed",
-				syncer.WaitError:   "will retry: " + p.Detail,
-				"":                 "queued",
+				syncer.WaitApp:       "loads when Claude is closed",
+				syncer.WaitProject:   "project folder not found here (see Projects)",
+				syncer.WaitFormat:    "paused: Claude's session format changed",
+				syncer.WaitAmbiguous: "paused: choose your Claude data folder in Settings",
+				syncer.WaitError:     "will retry: " + p.Detail,
+				"":                   "queued",
 			}[p.Reason]
-			o.(*widget.Label).SetText(fmt.Sprintf("%s  ·  from %s  ·  %s", title, p.Header.DeviceName, why))
+			from := "from " + p.Header.DeviceName
+			if p.Missing {
+				from = "disappeared from this PC; putting it back"
+			}
+			o.(*widget.Label).SetText(fmt.Sprintf("%s  ·  %s  ·  %s", title, from, why))
 		})
 
 	refresh := func() {
@@ -108,8 +117,13 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 		if s.Busy {
 			state = "Syncing…"
 		}
-		summary.SetText(fmt.Sprintf("%s  ·  %s  ·  connection: %s\nLast backup: %s (%d uploaded)   ·   every %d min\nLast restore: %s (%d applied)   ·   every %d min",
+		summary.SetText(fmt.Sprintf("%s  ·  %s  ·  connection: %s\nLast backup: %s (%d uploaded)   ·   every %d min\nLast sync: %s (%d applied)   ·   every %d min",
 			c.DeviceName, state, route, ago(s.LastBackup), s.Uploaded, c.BackupMinutes, ago(s.LastRestore), s.Restored, c.RestoreMinutes))
+		if s.LastSnapshot != "" {
+			safety.SetText("Last sync saved the files it replaced. Undo it in the Recover tab if needed.")
+		} else {
+			safety.SetText("Backs up this PC before every sync. Never deletes; replaced files are snapshotted.")
+		}
 		errLbl.SetText(s.LastError)
 		pending = s.Pending
 		list.Refresh()
@@ -120,7 +134,7 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 			}
 		}
 		if waitApp > 0 {
-			banner.SetText(fmt.Sprintf("%d session(s) from your other PCs are ready. Claude must close briefly to load them.", waitApp))
+			banner.SetText(fmt.Sprintf("%d session(s) are ready. They load automatically the next time Claude is closed, or now if you let ClaudeSync close it.", waitApp))
 			bannerBox.Show()
 		} else {
 			bannerBox.Hide()
@@ -129,7 +143,7 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 			errLbl.SetText(strings.TrimSpace(s.LastError + "\nClaude's session format changed after an update. Backups continue, but restoring desktop sessions is paused until ClaudeSync is updated."))
 		}
 	}
-	top := container.NewVBox(summary, container.NewHBox(backupBtn, restoreBtn), errLbl, bannerBox, bold("Waiting to restore"))
+	top := container.NewVBox(summary, safety, container.NewHBox(backupBtn, restoreBtn), errLbl, bannerBox, bold("Waiting to restore"))
 	return container.NewPadded(container.NewBorder(top, nil, nil, nil, list)), refresh
 }
 
@@ -211,7 +225,7 @@ func (a *App) pickProjectFolder(key, name string) {
 			return
 		}
 		a.log.Printf("project %s mapped to %s", name, u.Path())
-		go a.doRestore(true)
+		go a.doSync(true)
 	}, a.win)
 	d.Resize(fyne.NewSize(700, 500))
 	d.Show()
@@ -333,9 +347,17 @@ func (a *App) settingsTab() fyne.CanvasObject {
 	claudeHome := widget.NewEntry()
 	claudeHome.SetText(c.ClaudeHome)
 	claudeHome.SetPlaceHolder("auto (~/.claude)")
-	desktopDir := widget.NewEntry()
+	loc := claude.Detect(c.ClaudeHome, c.DesktopDir)
+	desktopDir := widget.NewSelectEntry(loc.Candidates)
 	desktopDir.SetText(c.DesktopDir)
-	desktopDir.SetPlaceHolder("auto-detect")
+	desktopDir.SetPlaceHolder("auto-detect: " + orNone(loc.DesktopDir))
+	desktopNote := wrapLabel("")
+	if len(loc.Candidates) > 1 && c.DesktopDir == "" && runtime.GOOS != "windows" {
+		desktopNote.SetText("⚠ This PC has more than one folder with Claude sessions. Choose the one your Claude app uses (open the list) and press Save; until then, sessions from other PCs aren't loaded here.")
+		desktopNote.Importance = widget.WarningImportance
+	} else {
+		desktopNote.Hide()
+	}
 
 	save := widget.NewButton("Save", func() {
 		n := a.settings()
@@ -409,10 +431,142 @@ func (a *App) settingsTab() fyne.CanvasObject {
 		widget.NewFormItem("Working folder size limit (MB)", scratchMB),
 		widget.NewFormItem("Look for projects in", roots),
 		widget.NewFormItem("Claude Code folder", claudeHome),
-		widget.NewFormItem("Desktop app data folder", desktopDir),
+		widget.NewFormItem("Desktop app data folder", container.NewVBox(desktopDir, desktopNote)),
 		widget.NewFormItem("", login),
 	)
 	return container.NewVScroll(container.NewPadded(container.NewVBox(form, save)))
+}
+
+// --- Recover ---
+
+func (a *App) recoverTab() fyne.CanvasObject {
+	// Conversations on disk that Claude's sidebar doesn't show.
+	var orphans []syncer.Orphan
+	picked := map[int]bool{}
+	orphanInfo := wrapLabel("")
+	orphanList := widget.NewList(func() int { return len(orphans) },
+		func() fyne.CanvasObject { return widget.NewCheck("", nil) },
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			c := o.(*widget.Check)
+			x := orphans[i]
+			c.Text = fmt.Sprintf("%s  ·  %s  ·  %s  ·  %d KB", x.Modified.Local().Format("2006-01-02 15:04"), x.Title, x.Cwd, x.Size>>10)
+			if x.PartOf != "" {
+				c.Text += "  ·  earlier part of a chat already in Claude"
+			}
+			c.OnChanged = nil
+			c.SetChecked(picked[i])
+			c.OnChanged = func(b bool) { picked[i] = b }
+			c.Refresh()
+		})
+	findOrphans := func() {
+		e := a.engine()
+		if e == nil {
+			return
+		}
+		go func() {
+			list, err := e.Scanner.Orphans()
+			fyne.Do(func() {
+				orphans, picked = list, map[int]bool{}
+				lost := 0
+				for i, o := range orphans {
+					picked[i] = o.PartOf == "" // earlier parts of listed chats would only be duplicates
+					if o.PartOf == "" {
+						lost++
+					}
+				}
+				switch {
+				case err != nil:
+					orphanInfo.SetText(err.Error())
+				case len(orphans) == 0:
+					orphanInfo.SetText("Every conversation on this PC is in Claude's sidebar.")
+				default:
+					orphanInfo.SetText(fmt.Sprintf("%d conversation(s) are on this PC but not in Claude's sidebar; %d look lost and are ticked. The rest are earlier parts of chats you still have. Close Claude, then press Add.", len(orphans), lost))
+				}
+				orphanList.Refresh()
+			})
+		}()
+	}
+	adopt := widget.NewButton("Add ticked chats to Claude", func() {
+		var sel []syncer.Orphan
+		for i, o := range orphans {
+			if picked[i] {
+				sel = append(sel, o)
+			}
+		}
+		if len(sel) == 0 {
+			return
+		}
+		go func() {
+			n, err := a.engine().Scanner.Adopt(sel)
+			fyne.Do(func() {
+				if err != nil {
+					dialog.ShowError(err, a.win)
+				}
+				if n > 0 {
+					a.log.Printf("added %d recovered chat(s) to Claude", n)
+					dialog.ShowInformation("Chats added", fmt.Sprintf("%d chat(s) are back in Claude's sidebar. Open Claude to see them; they'll be backed up at the next sync.", n), a.win)
+				}
+				findOrphans()
+			})
+		}()
+	})
+	adopt.Importance = widget.HighImportance
+
+	// Snapshots taken before ClaudeSync changed anything.
+	var snaps []syncer.SnapshotInfo
+	snapList := widget.NewList(func() int { return len(snaps) },
+		func() fyne.CanvasObject {
+			return container.NewBorder(nil, nil, nil, widget.NewButton("Put these files back", nil), widget.NewLabel(""))
+		},
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			s := snaps[i]
+			b := o.(*fyne.Container)
+			b.Objects[0].(*widget.Label).SetText(fmt.Sprintf("%s  ·  %s  ·  %d KB", s.Time.Format("2006-01-02 15:04:05"), s.Reason, s.Size>>10))
+			b.Objects[1].(*widget.Button).OnTapped = func() { a.confirmUndo(s) }
+		})
+	loadSnaps := func() {
+		snaps = syncer.ListSnapshots(snapshotDir())
+		snapList.Refresh()
+	}
+	refresh := widget.NewButton("Refresh", func() {
+		findOrphans()
+		loadSnaps()
+	})
+	findOrphans()
+	loadSnaps()
+
+	top := container.NewVBox(
+		container.NewBorder(nil, nil, bold("Chats missing from Claude's sidebar"), refresh),
+		orphanInfo,
+	)
+	orphansBox := container.NewBorder(top, adopt, nil, nil, orphanList)
+	snapsBox := container.NewBorder(container.NewVBox(bold("Snapshots"),
+		wrapLabel("Before every change, ClaudeSync saves the files it is about to replace. Putting a snapshot back restores those files exactly; nothing is deleted.")), nil, nil, nil, snapList)
+	split := container.NewVSplit(orphansBox, snapsBox)
+	split.Offset = 0.55
+	return container.NewPadded(split)
+}
+
+func (a *App) confirmUndo(s syncer.SnapshotInfo) {
+	files, _ := syncer.SnapshotFiles(s.Path)
+	dialog.ShowConfirm("Put files back?", fmt.Sprintf("Restore the %d file(s) saved at %s (%s)?\n\nClose Claude first. The current versions are saved in a new snapshot, so this can be undone too.",
+		len(files), s.Time.Format("2006-01-02 15:04:05"), s.Reason), func(ok bool) {
+		if !ok {
+			return
+		}
+		go func() {
+			n, err := a.engine().UndoSnapshot(s.Path)
+			fyne.Do(func() {
+				if errors.Is(err, syncer.ErrCloseApp) {
+					dialog.ShowInformation("Close Claude first", "Quit Claude, then try again.", a.win)
+				} else if err != nil {
+					dialog.ShowError(err, a.win)
+				} else {
+					dialog.ShowInformation("Done", fmt.Sprintf("Put back %d file(s).", n), a.win)
+				}
+			})
+		}()
+	}, a.win)
 }
 
 // --- Server ---

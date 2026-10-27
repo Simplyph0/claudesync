@@ -17,6 +17,11 @@ type Locations struct {
 	ClaudeHome string   // ~/.claude (or $CLAUDE_CONFIG_DIR)
 	DesktopDir string   // desktop app data folder containing claude-code-sessions; "" if none
 	DesktopAlt []string // other paths that refer to the desktop data folder (Windows Store virtualization)
+	// Candidates are all folders that hold desktop sessions. Ambiguous is set
+	// when there are several and none was chosen in Settings: ClaudeSync then
+	// won't restore desktop sessions until the user picks one.
+	Candidates []string
+	Ambiguous  bool
 }
 
 // SessionsDir is where the desktop app keeps its Code-tab session records.
@@ -50,8 +55,16 @@ func Detect(claudeHomeOverride, desktopOverride string) Locations {
 		}
 	}
 	cands := desktopCandidates(home)
+	for _, c := range cands {
+		if dirExists(filepath.Join(c, "claude-code-sessions")) && !sameDir(c, l.Candidates) {
+			l.Candidates = append(l.Candidates, c)
+		}
+	}
 	if l.DesktopDir == "" {
 		l.DesktopDir = pickDesktopDir(cands)
+		// On Windows, the Store app's virtualised folder mirrors the real one;
+		// that's one folder, not two.
+		l.Ambiguous = runtime.GOOS != "windows" && len(l.Candidates) > 1
 	}
 	for _, c := range cands {
 		if c != l.DesktopDir && dirExists(c) {
@@ -80,8 +93,29 @@ func desktopCandidates(home string) []string {
 			cfg = filepath.Join(home, ".config")
 		}
 		out = append(out, filepath.Join(cfg, "Claude"), filepath.Join(cfg, "claude-desktop"), filepath.Join(cfg, "claude"))
+		m, _ := filepath.Glob(filepath.Join(home, ".var", "app", "*", "config", "Claude")) // Flatpak
+		out = append(out, m...)
+		m, _ = filepath.Glob(filepath.Join(home, "snap", "*", "current", ".config", "Claude")) // Snap
+		out = append(out, m...)
 	}
 	return out
+}
+
+func sameDir(p string, list []string) bool {
+	rp, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		rp = p
+	}
+	for _, q := range list {
+		rq, err := filepath.EvalSymlinks(q)
+		if err != nil {
+			rq = q
+		}
+		if rp == rq || (runtime.GOOS == "windows" && strings.EqualFold(rp, rq)) {
+			return true
+		}
+	}
+	return false
 }
 
 // pickDesktopDir prefers the candidate whose session folder changed most recently.

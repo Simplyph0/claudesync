@@ -19,7 +19,7 @@ server.
 | Server form | Headless background service (Windows service / systemd unit) |
 | History | Server keeps the last N versions per item, default 20, configurable |
 | Conflicts | Keep both: the other PC's diverged copy is restored as a separate session titled "(from <PC>)" |
-| Restore while the desktop app runs | Notify "updates ready, restart Claude?"; on yes close Claude, restore, reopen |
+| Restore while the desktop app runs | Wait; apply as soon as Claude is closed. "Close Claude and load updates" asks Claude to quit normally and reopens it; never force-closes |
 | Unknown desktop session format | Keep backing up raw files, pause restoring desktop sessions, notify |
 | Client UX | Tray icon, start at login, desktop notifications; backup interval default 30 min, restore interval set separately |
 | Path mapping | Auto-match projects by git remote URL, then folder name; GUI lets you override per PC |
@@ -75,15 +75,40 @@ Blobs over 64 MB are uploaded in chunks (Cloudflare's request body limit is
 
 ## Sync loop (client)
 
-- **Backup** every `backupInterval` (default 30 min): scan, build portable
-  items, upload changed ones (by content hash).
-- **Restore** every `restoreInterval` (default 30 min, separate): fetch item
-  headers since the last seen sequence; for each item last written by another
-  PC, apply it unless the local copy also changed since the last sync →
-  conflict → restore as a copy.
-- Desktop session restores are queued while the Claude app is running; the
-  client notifies and offers restart.
+Safety rules, in priority order:
 
+1. **Never lose data.** ClaudeSync never deletes a file, locally or on the server.
+   Before it replaces a local file, it saves the current version in a local snapshot
+   (`snapshots/*.tar.zst`, the last 40 are kept). Before the first change in a sync,
+   it also saves the whole session list. A file whose copy can't be saved is not
+   replaced.
+2. **Back up first.** Every sync uploads this PC's changes before restoring anything.
+3. **Never touch a running Claude.** Session restores wait until the desktop app is
+   closed. ClaudeSync only ever asks Claude to quit; it never kills it. It relaunches
+   Claude only through Claude's own launcher.
+
+Each sync:
+
+- **Repair:** while Claude is closed, fix JSON files broken by 0.1 (unescaped
+  backslashes in paths restored from Linux), saving the originals first.
+- **Backup:** upload items whose content changed. Unreadable desktop records are never
+  uploaded. Records in an unknown but valid format are uploaded under a separate
+  `raw_` id, so they never replace a readable session.
+- **Reconcile:** compare the full server list against this PC.
+  - **Behind:** the server version is newer than the one this PC last synced, so restore it.
+  - **Missing:** this PC had the item, it is gone, and Claude left no `deleted_` marker,
+    so restore it (self-heal).
+  - **Deleted in Claude:** there is a `deleted_` marker, so don't restore it here.
+- **Conflict:** the item changed both here and elsewhere. For sessions, keep both: the
+  other PC's version becomes a copy titled "(from <PC>)". For settings and memory, the
+  newer version wins; this PC's copy is kept in the snapshot.
+- **Unreadable server version:** if the newest server version is unreadable (uploaded by
+  0.1), use the newest readable one from history.
+
+The Recover tab lists conversations on disk that no sidebar entry points to
+(orphans). It marks the ones that are earlier parts of chats still listed, and can
+add the rest back by cloning the newest local record's format. It only ever creates
+new files.
 ## Server storage
 
 `<data>/server.json` (password hash = Argon2id, settings),
