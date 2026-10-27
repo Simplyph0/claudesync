@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +46,8 @@ type State struct {
 	Items    map[string]*ItemState `json:"items"`
 	Projects map[string]string     `json:"projects"` // project key -> local folder
 	Pending  map[string]*Pending   `json:"pending"`
+	Skipped  map[string]string     `json:"skipped,omitempty"` // key -> title; never restored on this PC
+	Removed  map[string]bool       `json:"removed,omitempty"` // struck from the server backup; not synced
 }
 
 func LoadState(path string) (*State, error) {
@@ -66,6 +69,12 @@ func LoadState(path string) (*State, error) {
 	}
 	if st.Pending == nil {
 		st.Pending = map[string]*Pending{}
+	}
+	if st.Skipped == nil {
+		st.Skipped = map[string]string{}
+	}
+	if st.Removed == nil {
+		st.Removed = map[string]bool{}
 	}
 	return st, nil
 }
@@ -227,8 +236,9 @@ func (e *Engine) backup(ctx context.Context) error {
 		l := scan.Items[k]
 		e.mu.Lock()
 		st := e.st.Items[k]
+		removed := e.st.Removed[k]
 		e.mu.Unlock()
-		if st != nil && st.Hash != "" && st.Stamp == l.Stamp {
+		if removed || (st != nil && st.Hash != "" && st.Stamp == l.Stamp) {
 			continue
 		}
 		it, err := l.Build()
@@ -252,7 +262,13 @@ func (e *Engine) backup(ctx context.Context) error {
 		if st != nil {
 			base = st.Version
 		}
-		h, err := e.API.Put(ctx, l.Kind, l.ID, base, blob)
+		h, err := e.API.Put(ctx, l.Kind, l.ID, base, blob, SealMeta(e.Key, l.Kind, l.ID, l.Title))
+		if errors.Is(err, client.ErrRemoved) {
+			e.mu.Lock()
+			e.st.Removed[k] = true
+			e.mu.Unlock()
+			continue
+		}
 		if errors.Is(err, client.ErrConflict) {
 			conflicts++ // changed elsewhere too; the restore that follows keeps both copies
 			continue
@@ -362,6 +378,14 @@ func (e *Engine) sync(ctx context.Context) error {
 	pending := map[string]*Pending{}
 	for _, h := range list.Items {
 		k := h.Key()
+		if h.Removed {
+			e.st.Removed[k] = true
+			continue
+		}
+		delete(e.st.Removed, k)
+		if _, skip := e.st.Skipped[k]; skip {
+			continue
+		}
 		st := e.st.Items[k]
 		local := scan.Items[k]
 		if local == nil && h.Kind == proto.KindSession && scan.Deleted[h.ID] {
@@ -757,5 +781,113 @@ func sortedKeys[V any](m map[string]V) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// ServerItem is one entry in the server's backup, for the History tab.
+type ServerItem struct {
+	Header  proto.ItemHeader
+	Title   string
+	Skipped bool // skipped on this PC
+}
+
+// ServerItems lists everything in the server backup, including removed
+// items that can still be brought back.
+func (e *Engine) ServerItems(ctx context.Context) ([]ServerItem, error) {
+	list, err := e.API.Changes(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]ServerItem, 0, len(list.Items))
+	for _, h := range list.Items {
+		k := h.Key()
+		title := OpenMeta(e.Key, h.Meta, h.Kind, h.ID)
+		if title == "" {
+			if st := e.st.Items[k]; st != nil && st.Title != "" {
+				title = st.Title
+			} else if p := e.st.Pending[k]; p != nil && p.Title != "" {
+				title = p.Title
+			} else if t := e.st.Skipped[k]; t != "" {
+				title = t
+			} else {
+				title = h.ID
+			}
+		}
+		_, skipped := e.st.Skipped[k]
+		out = append(out, ServerItem{Header: h, Title: title, Skipped: skipped})
+	}
+	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Title) < strings.ToLower(out[j].Title) })
+	return out, nil
+}
+
+// RemoveFromServer strikes an item from the server backup. Every PC stops
+// syncing it; no PC's own copy is touched. It can be brought back for
+// proto.RemovedHoldDays.
+func (e *Engine) RemoveFromServer(ctx context.Context, kind, id string) error {
+	if _, err := e.API.Remove(ctx, kind, id); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.st.Removed[kind+"/"+id] = true
+	delete(e.st.Pending, kind+"/"+id)
+	err := e.saveLocked()
+	e.mu.Unlock()
+	e.logf("removed %s/%s from the server backup", kind, id)
+	e.changed()
+	return err
+}
+
+// BringBack undoes RemoveFromServer.
+func (e *Engine) BringBack(ctx context.Context, kind, id string) error {
+	if _, err := e.API.BringBack(ctx, kind, id); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	delete(e.st.Removed, kind+"/"+id)
+	err := e.saveLocked()
+	e.mu.Unlock()
+	e.logf("brought %s/%s back into the server backup", kind, id)
+	e.changed()
+	return err
+}
+
+// Skip stops an item from ever being restored on this PC and takes it off
+// the waiting list. It changes nothing on the server or other PCs.
+func (e *Engine) Skip(key, title string) error {
+	e.mu.Lock()
+	if title == "" {
+		if p := e.st.Pending[key]; p != nil {
+			title = p.Title
+		}
+	}
+	e.st.Skipped[key] = title
+	delete(e.st.Pending, key)
+	err := e.saveLocked()
+	e.mu.Unlock()
+	e.logf("skipping %q on this PC", title)
+	e.changed()
+	return err
+}
+
+// Unskip lets a skipped item restore again at the next sync.
+func (e *Engine) Unskip(key string) error {
+	e.mu.Lock()
+	delete(e.st.Skipped, key)
+	err := e.saveLocked()
+	e.mu.Unlock()
+	e.changed()
+	return err
+}
+
+// Skipped lists items skipped on this PC (key -> title).
+func (e *Engine) Skipped() map[string]string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := map[string]string{}
+	for k, v := range e.st.Skipped {
+		out[k] = v
+	}
 	return out
 }

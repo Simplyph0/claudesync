@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -51,6 +52,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/items/{kind}/{id}", s.auth(s.getItem))
 	mux.Handle("GET /api/items/{kind}/{id}/versions", s.auth(s.itemVersions))
 	mux.Handle("PUT /api/items/{kind}/{id}", s.auth(s.putItem))
+	mux.Handle("DELETE /api/items/{kind}/{id}", s.auth(s.removeItem))
+	mux.Handle("POST /api/items/{kind}/{id}/restore", s.auth(s.restoreItem))
 	mux.Handle("POST /api/uploads", s.auth(s.startUpload))
 	mux.Handle("PUT /api/uploads/{upload}/{n}", s.auth(s.putChunk))
 	mux.Handle("POST /api/uploads/{upload}/commit/{kind}/{id}", s.auth(s.commitUpload))
@@ -206,7 +209,7 @@ func (s *Server) putItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, "body too large; use chunked upload")
 		return
 	}
-	h, err := s.store.Put(deviceFrom(r), r.PathValue("kind"), r.PathValue("id"), base, blob)
+	h, err := s.store.Put(deviceFrom(r), r.PathValue("kind"), r.PathValue("id"), base, blob, metaHeader(r))
 	if !s.check(w, err) {
 		return
 	}
@@ -244,7 +247,7 @@ func (s *Server) commitUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing "+proto.HeaderBaseVersion)
 		return
 	}
-	h, err := s.store.FinishUpload(deviceFrom(r), r.PathValue("upload"), r.PathValue("kind"), r.PathValue("id"), base)
+	h, err := s.store.FinishUpload(deviceFrom(r), r.PathValue("upload"), r.PathValue("kind"), r.PathValue("id"), base, metaHeader(r))
 	if !s.check(w, err) {
 		return
 	}
@@ -256,6 +259,8 @@ func (s *Server) check(w http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil:
 		return true
+	case errors.Is(err, ErrRemoved):
+		writeErr(w, http.StatusGone, err.Error())
 	case errors.Is(err, ErrConflict):
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrNotFound):
@@ -346,4 +351,29 @@ func (l *limiter) reset(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.hits, ip)
+}
+
+func metaHeader(r *http.Request) []byte {
+	b, _ := base64.StdEncoding.DecodeString(r.Header.Get(proto.HeaderMeta))
+	return b
+}
+
+// removeItem strikes an item from the backup; every PC stops syncing it.
+func (s *Server) removeItem(w http.ResponseWriter, r *http.Request) {
+	h, err := s.store.SetRemoved(r.PathValue("kind"), r.PathValue("id"), true)
+	if !s.check(w, err) {
+		return
+	}
+	s.Logf("device %q removed %s from the backup", deviceFrom(r).Name, h.Key())
+	writeJSON200(w, h)
+}
+
+// restoreItem brings a removed item back during its hold period.
+func (s *Server) restoreItem(w http.ResponseWriter, r *http.Request) {
+	h, err := s.store.SetRemoved(r.PathValue("kind"), r.PathValue("id"), false)
+	if !s.check(w, err) {
+		return
+	}
+	s.Logf("device %q brought back %s", deviceFrom(r).Name, h.Key())
+	writeJSON200(w, h)
 }

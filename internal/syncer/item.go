@@ -127,6 +127,35 @@ func Seal(it *Item, key []byte) ([]byte, error) {
 	return vault.Seal(key, raw.Bytes(), []byte(it.Key()))
 }
 
+// itemMeta is the small encrypted description stored next to each version.
+type itemMeta struct {
+	Title string `json:"t"`
+}
+
+// SealMeta encrypts an item's title for the server's item list.
+func SealMeta(key []byte, kind, id, title string) []byte {
+	b, _ := json.Marshal(itemMeta{Title: title})
+	out, err := vault.Seal(key, b, []byte("meta:"+kind+"/"+id))
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// OpenMeta returns the title in a header's Meta ("" if there is none).
+func OpenMeta(key, meta []byte, kind, id string) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	b, err := vault.Open(key, meta, []byte("meta:"+kind+"/"+id))
+	if err != nil {
+		return ""
+	}
+	var m itemMeta
+	_ = json.Unmarshal(b, &m)
+	return m.Title
+}
+
 // Unseal decrypts and unpacks a blob for kind/id.
 func Unseal(blob, key []byte, kind, id string) (*Item, error) {
 	raw, err := vault.Open(key, blob, []byte(kind+"/"+id))

@@ -89,7 +89,7 @@ func TestUnreadableVersionsDontWin(t *testing.T) {
 	bad := &Item{M: Manifest{Format: FormatVersion, Kind: proto.KindSession, ID: "local_aaaa", Title: "local_aaaa", UnknownFormat: true},
 		Files: []File{{RoleDesktop, acct + "/local_aaaa.json", []byte(`{"broken`)}}}
 	blob, _ := Seal(bad, w.key)
-	if _, err := desk.eng.API.Put(context.Background(), proto.KindSession, "local_aaaa", 1, blob); err != nil {
+	if _, err := desk.eng.API.Put(context.Background(), proto.KindSession, "local_aaaa", 1, blob, nil); err != nil {
 		t.Fatal(err)
 	}
 	lap := w.pc("Laptop", "code")

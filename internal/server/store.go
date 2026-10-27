@@ -29,6 +29,7 @@ var (
 	ErrNotFound     = errors.New("not found")
 	ErrBadPassword  = errors.New("wrong password")
 	ErrNotInitDone  = errors.New("server has no password yet; run 'claudesync-server init'")
+	ErrRemoved      = errors.New("this item was removed from the server backup")
 	ErrInvalidInput = errors.New("invalid input")
 )
 
@@ -47,9 +48,21 @@ type device struct {
 }
 
 type itemMeta struct {
-	Kind     string             `json:"kind"`
-	ID       string             `json:"id"`
-	Versions []proto.ItemHeader `json:"versions"` // oldest first
+	Kind      string             `json:"kind"`
+	ID        string             `json:"id"`
+	Versions  []proto.ItemHeader `json:"versions"` // oldest first
+	Removed   bool               `json:"removed,omitempty"`
+	RemovedAt time.Time          `json:"removedAt,omitzero"`
+}
+
+// latest is the newest version's header, carrying the removed state.
+func (m *itemMeta) latest() (proto.ItemHeader, bool) {
+	if len(m.Versions) == 0 {
+		return proto.ItemHeader{}, false
+	}
+	h := m.Versions[len(m.Versions)-1]
+	h.Removed, h.RemovedAt = m.Removed, m.RemovedAt
+	return h, true
 }
 
 type index struct {
@@ -277,14 +290,17 @@ func (s *Store) blobPath(kind, id string, v int) string {
 
 // Put stores a new version. base must equal the current latest version
 // (0 for a new item) or ErrConflict is returned.
-func (s *Store) Put(dev proto.Device, kind, id string, base int, blob []byte) (proto.ItemHeader, error) {
-	if !proto.ValidID(kind) || !proto.ValidID(id) {
+func (s *Store) Put(dev proto.Device, kind, id string, base int, blob, meta []byte) (proto.ItemHeader, error) {
+	if !proto.ValidID(kind) || !proto.ValidID(id) || len(meta) > 4096 {
 		return proto.ItemHeader{}, ErrInvalidInput
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := kind + "/" + id
 	m := s.idx.Items[key]
+	if m != nil && m.Removed {
+		return proto.ItemHeader{}, ErrRemoved
+	}
 	latest := 0
 	if m != nil && len(m.Versions) > 0 {
 		latest = m.Versions[len(m.Versions)-1].Version
@@ -292,7 +308,7 @@ func (s *Store) Put(dev proto.Device, kind, id string, base int, blob []byte) (p
 	if base != latest {
 		return proto.ItemHeader{}, ErrConflict
 	}
-	h := proto.ItemHeader{Kind: kind, ID: id, Version: latest + 1, Seq: s.idx.Seq + 1, Device: dev.ID, DeviceName: dev.Name, Size: int64(len(blob)), Time: time.Now().UTC()}
+	h := proto.ItemHeader{Kind: kind, ID: id, Version: latest + 1, Seq: s.idx.Seq + 1, Device: dev.ID, DeviceName: dev.Name, Size: int64(len(blob)), Time: time.Now().UTC(), Meta: meta}
 	p := s.blobPath(kind, id, h.Version)
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return proto.ItemHeader{}, err
@@ -330,12 +346,53 @@ func (s *Store) Changes(since int64) proto.ItemList {
 	defer s.mu.Unlock()
 	out := proto.ItemList{Seq: s.idx.Seq, Items: []proto.ItemHeader{}}
 	for _, m := range s.idx.Items {
-		if n := len(m.Versions); n > 0 && m.Versions[n-1].Seq > since {
-			out.Items = append(out.Items, m.Versions[n-1])
+		if h, ok := m.latest(); ok && h.Seq > since {
+			out.Items = append(out.Items, h)
 		}
 	}
 	sort.Slice(out.Items, func(i, j int) bool { return out.Items[i].Seq < out.Items[j].Seq })
 	return out
+}
+
+// SetRemoved strikes an item from the backup (removed=true) or brings it
+// back. Nothing is deleted until the hold period ends (PurgeRemoved).
+func (s *Store) SetRemoved(kind, id string, removed bool) (proto.ItemHeader, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.idx.Items[kind+"/"+id]
+	if m == nil || len(m.Versions) == 0 {
+		return proto.ItemHeader{}, ErrNotFound
+	}
+	if m.Removed != removed {
+		m.Removed = removed
+		m.RemovedAt = time.Time{}
+		if removed {
+			m.RemovedAt = time.Now().UTC()
+		}
+		// bump the sequence so every PC sees the change
+		s.idx.Seq++
+		m.Versions[len(m.Versions)-1].Seq = s.idx.Seq
+	}
+	h, _ := m.latest()
+	return h, s.saveIndexLocked()
+}
+
+// PurgeRemoved deletes items removed longer than the hold period ago.
+func (s *Store) PurgeRemoved(now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for key, m := range s.idx.Items {
+		if m.Removed && now.Sub(m.RemovedAt) > proto.RemovedHoldDays*24*time.Hour {
+			_ = os.RemoveAll(filepath.Join(s.dir, "items", m.Kind, m.ID))
+			delete(s.idx.Items, key)
+			n++
+		}
+	}
+	if n > 0 {
+		_ = s.saveIndexLocked()
+	}
+	return n
 }
 
 func (s *Store) Versions(kind, id string) ([]proto.ItemHeader, error) {
@@ -390,7 +447,7 @@ func (s *Store) PutChunk(uploadID string, n int, data []byte) error {
 }
 
 // FinishUpload concatenates the chunks and stores them as an item version.
-func (s *Store) FinishUpload(dev proto.Device, uploadID, kind, id string, base int) (proto.ItemHeader, error) {
+func (s *Store) FinishUpload(dev proto.Device, uploadID, kind, id string, base int, meta []byte) (proto.ItemHeader, error) {
 	if !proto.ValidID(uploadID) {
 		return proto.ItemHeader{}, ErrInvalidInput
 	}
@@ -408,7 +465,7 @@ func (s *Store) FinishUpload(dev proto.Device, uploadID, kind, id string, base i
 		}
 		blob = append(blob, b...)
 	}
-	return s.Put(dev, kind, id, base, blob)
+	return s.Put(dev, kind, id, base, blob, meta)
 }
 
 // CleanUploads removes abandoned chunked uploads older than a day.

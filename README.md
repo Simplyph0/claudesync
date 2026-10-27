@@ -109,6 +109,11 @@ After setup ClaudeSync lives in the tray:
   waits in the **Projects** tab until you pick the folder.
 - **History:** the server keeps the last 20 versions of everything (you can change
   this in the **Server** tab). Any version can be restored from the **History** tab.
+- **Remove from the backup:** in the **History** tab, **Remove from server backup** stops
+  an item syncing to every PC without deleting it from any PC's Claude. It can be
+  brought back for 30 days ("Show removed"), then the server deletes it.
+- **Skip on one PC:** **Skip** next to an item waiting to restore keeps it off that PC
+  only. **Skipped on this PC…** lists skipped items so you can un-skip them.
 - **Password changes:** the **Server** tab can change the server password. Connected
   PCs stay connected.
 

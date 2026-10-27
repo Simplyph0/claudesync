@@ -80,9 +80,13 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 
 	var pending []syncer.Pending
 	list := widget.NewList(func() int { return len(pending) },
-		func() fyne.CanvasObject { return widget.NewLabel("") },
+		func() fyne.CanvasObject {
+			return container.NewBorder(nil, nil, nil, widget.NewButton("Skip", nil), widget.NewLabel(""))
+		},
 		func(i widget.ListItemID, o fyne.CanvasObject) {
 			p := pending[i]
+			row := o.(*fyne.Container)
+			row.Objects[1].(*widget.Button).OnTapped = func() { a.confirmSkip(p) }
 			title := p.Title
 			if title == "" {
 				title = p.Header.Kind + " " + p.Header.ID
@@ -99,8 +103,9 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 			if p.Missing {
 				from = "disappeared from this PC; putting it back"
 			}
-			o.(*widget.Label).SetText(fmt.Sprintf("%s  ·  %s  ·  %s", title, from, why))
+			row.Objects[0].(*widget.Label).SetText(fmt.Sprintf("%s  ·  %s  ·  %s", title, from, why))
 		})
+	skippedBtn := widget.NewButton("Skipped on this PC…", a.showSkipped)
 
 	refresh := func() {
 		e := a.engine()
@@ -134,7 +139,7 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 			}
 		}
 		if waitApp > 0 {
-			banner.SetText(fmt.Sprintf("%d session(s) are ready. They load automatically the next time Claude is closed, or now if you let ClaudeSync close it.", waitApp))
+			banner.SetText(fmt.Sprintf("%d session(s) ready. They load as soon as Claude is closed.", waitApp))
 			bannerBox.Show()
 		} else {
 			bannerBox.Hide()
@@ -143,7 +148,8 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 			errLbl.SetText(strings.TrimSpace(s.LastError + "\nClaude's session format changed after an update. Backups continue, but restoring desktop sessions is paused until ClaudeSync is updated."))
 		}
 	}
-	top := container.NewVBox(summary, safety, container.NewHBox(backupBtn, restoreBtn), errLbl, bannerBox, bold("Waiting to restore"))
+	top := container.NewVBox(summary, safety, container.NewHBox(backupBtn, restoreBtn), errLbl, bannerBox,
+		container.NewBorder(nil, nil, bold("Waiting to restore"), skippedBtn))
 	return container.NewPadded(container.NewBorder(top, nil, nil, nil, list)), refresh
 }
 
@@ -233,11 +239,71 @@ func (a *App) pickProjectFolder(key, name string) {
 
 // --- History ---
 
+func (a *App) confirmSkip(p syncer.Pending) {
+	title := p.Title
+	if title == "" {
+		title = p.Header.ID
+	}
+	dialog.ShowConfirm("Skip on this PC?", fmt.Sprintf("Stop restoring %q on this PC?\n\nIt stays in the server backup and on your other PCs. Un-skip it any time with \"Skipped on this PC…\".", title), func(ok bool) {
+		if !ok {
+			return
+		}
+		if err := a.engine().Skip(p.Header.Key(), p.Title); err != nil {
+			dialog.ShowError(err, a.win)
+		}
+	}, a.win)
+}
+
+func (a *App) showSkipped() {
+	e := a.engine()
+	if e == nil {
+		return
+	}
+	type row struct{ key, title string }
+	var rows []row
+	load := func() {
+		rows = rows[:0]
+		for k, t := range e.Skipped() {
+			if t == "" {
+				t = k
+			}
+			rows = append(rows, row{k, t})
+		}
+		sort.Slice(rows, func(i, j int) bool { return rows[i].title < rows[j].title })
+	}
+	load()
+	var list *widget.List
+	list = widget.NewList(func() int { return len(rows) },
+		func() fyne.CanvasObject {
+			return container.NewBorder(nil, nil, nil, widget.NewButton("Un-skip", nil), widget.NewLabel(""))
+		},
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			r := rows[i]
+			b := o.(*fyne.Container)
+			b.Objects[0].(*widget.Label).SetText(r.title)
+			b.Objects[1].(*widget.Button).OnTapped = func() {
+				if err := e.Unskip(r.key); err != nil {
+					dialog.ShowError(err, a.win)
+					return
+				}
+				load()
+				list.Refresh()
+				go a.doSync(true)
+			}
+		})
+	var content fyne.CanvasObject = list
+	if len(rows) == 0 {
+		content = widget.NewLabel("Nothing is skipped on this PC.")
+	}
+	d := dialog.NewCustom("Skipped on this PC", "Close", content, a.win)
+	d.Resize(fyne.NewSize(560, 360))
+	d.Show()
+}
+
 func (a *App) historyTab() fyne.CanvasObject {
-	type entry struct{ key, title string }
-	var items []entry
+	var all, items []syncer.ServerItem
 	var versions []proto.ItemHeader
-	selected := ""
+	var current *syncer.ServerItem
 	verList := widget.NewList(func() int { return len(versions) },
 		func() fyne.CanvasObject {
 			return container.NewBorder(nil, nil, nil, widget.NewButton("Restore this version", nil), widget.NewLabel(""))
@@ -250,12 +316,72 @@ func (a *App) historyTab() fyne.CanvasObject {
 		})
 	itemList := widget.NewList(func() int { return len(items) },
 		func() fyne.CanvasObject { return widget.NewLabel("") },
-		func(i widget.ListItemID, o fyne.CanvasObject) { o.(*widget.Label).SetText(items[i].title) })
-	itemList.OnSelected = func(i widget.ListItemID) {
-		selected = items[i].key
-		kind, id, _ := strings.Cut(selected, "/")
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			it := items[i]
+			label := "[" + it.Header.Kind + "] " + it.Title
+			if it.Header.Removed {
+				days := proto.RemovedHoldDays - int(time.Since(it.Header.RemovedAt).Hours()/24)
+				label += fmt.Sprintf("  ·  removed (deleted for good in %d days)", max(days, 0))
+			} else if it.Skipped {
+				label += "  ·  skipped on this PC"
+			}
+			o.(*widget.Label).SetText(label)
+		})
+	showRemoved := widget.NewCheck("Show removed", nil)
+	removeBtn := widget.NewButton("Remove from server backup", nil)
+	removeBtn.Importance = widget.DangerImportance
+	backBtn := widget.NewButton("Bring back", nil)
+	removeBtn.Disable()
+	backBtn.Hide()
+
+	filter := func() {
+		items = items[:0]
+		for _, it := range all {
+			if !it.Header.Removed || showRemoved.Checked {
+				items = append(items, it)
+			}
+		}
+		itemList.UnselectAll()
+		current, versions = nil, nil
+		removeBtn.Disable()
+		removeBtn.Show()
+		backBtn.Hide()
+		verList.Refresh()
+		itemList.Refresh()
+	}
+	var reload func()
+	reload = func() {
+		e := a.engine()
+		if e == nil {
+			return
+		}
 		go func() {
-			vs, err := a.engine().API.Versions(context.Background(), kind, id)
+			list, err := e.ServerItems(context.Background())
+			fyne.Do(func() {
+				if err != nil {
+					dialog.ShowError(err, a.win)
+					return
+				}
+				all = list
+				filter()
+			})
+		}()
+	}
+	showRemoved.OnChanged = func(bool) { filter() }
+
+	itemList.OnSelected = func(i widget.ListItemID) {
+		it := items[i]
+		current = &it
+		if it.Header.Removed {
+			removeBtn.Hide()
+			backBtn.Show()
+		} else {
+			backBtn.Hide()
+			removeBtn.Show()
+			removeBtn.Enable()
+		}
+		go func() {
+			vs, err := a.engine().API.Versions(context.Background(), it.Header.Kind, it.Header.ID)
 			fyne.Do(func() {
 				if err != nil {
 					dialog.ShowError(err, a.win)
@@ -267,31 +393,54 @@ func (a *App) historyTab() fyne.CanvasObject {
 			})
 		}()
 	}
-	load := widget.NewButton("Refresh list", func() {
-		e := a.engine()
-		if e == nil {
+	removeBtn.OnTapped = func() {
+		if current == nil {
 			return
 		}
-		items = items[:0]
-		for k, st := range e.Known() {
-			t := st.Title
-			if t == "" {
-				t = k
+		it := *current
+		dialog.ShowConfirm("Remove from the server backup?", fmt.Sprintf("Remove %q from the server backup?\n\n"+
+			"• Your PCs stop syncing it, and PCs that don't have it won't get it.\n"+
+			"• It is NOT deleted from any PC's Claude.\n"+
+			"• You can bring it back for %d days (\"Show removed\"); after that the server deletes it.", it.Title, proto.RemovedHoldDays), func(ok bool) {
+			if !ok {
+				return
 			}
-			kind, _, _ := strings.Cut(k, "/")
-			items = append(items, entry{k, "[" + kind + "] " + t})
+			go func() {
+				err := a.engine().RemoveFromServer(context.Background(), it.Header.Kind, it.Header.ID)
+				fyne.Do(func() {
+					if err != nil {
+						dialog.ShowError(err, a.win)
+					}
+					reload()
+				})
+			}()
+		}, a.win)
+	}
+	backBtn.OnTapped = func() {
+		if current == nil {
+			return
 		}
-		sort.Slice(items, func(i, j int) bool { return items[i].title < items[j].title })
-		itemList.UnselectAll()
-		versions = nil
-		verList.Refresh()
-		itemList.Refresh()
-	})
-	load.OnTapped()
-	split := container.NewHSplit(itemList, verList)
-	split.Offset = 0.45
-	help := wrapLabel("Pick a session or setting to see the versions the server keeps. Restoring an old version puts it on this PC; it becomes the newest version on every PC at the next backup.")
-	return container.NewPadded(container.NewBorder(container.NewVBox(help, load), nil, nil, nil, split))
+		it := *current
+		go func() {
+			err := a.engine().BringBack(context.Background(), it.Header.Kind, it.Header.ID)
+			fyne.Do(func() {
+				if err != nil {
+					dialog.ShowError(err, a.win)
+					return
+				}
+				reload()
+				go a.doSync(true)
+			})
+		}()
+	}
+
+	refresh := widget.NewButton("Refresh", reload)
+	reload()
+	left := container.NewBorder(nil, container.NewHBox(removeBtn, backBtn), nil, nil, itemList)
+	split := container.NewHSplit(left, verList)
+	split.Offset = 0.5
+	help := wrapLabel("Everything in the server backup. Pick an item to see its saved versions. Restoring an old version puts it on this PC; it becomes the newest everywhere at the next backup.")
+	return container.NewPadded(container.NewBorder(container.NewVBox(help, container.NewHBox(refresh, showRemoved)), nil, nil, nil, split))
 }
 
 func (a *App) confirmRollback(v proto.ItemHeader) {

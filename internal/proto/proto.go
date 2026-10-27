@@ -7,7 +7,7 @@ import (
 )
 
 // Version is the protocol/app version reported by both programs.
-const Version = "0.2.1"
+const Version = "0.3.0"
 
 // Item kinds.
 const (
@@ -60,7 +60,20 @@ type ItemHeader struct {
 	DeviceName string    `json:"deviceName"`
 	Size       int64     `json:"size"`
 	Time       time.Time `json:"time"`
+	// Meta is a small end-to-end encrypted description (the title) so lists
+	// can be shown without downloading every item.
+	Meta []byte `json:"meta,omitempty"`
+	// Removed items were struck from the server backup. They stop syncing
+	// and are deleted for good after RemovedHoldDays.
+	Removed   bool      `json:"removed,omitempty"`
+	RemovedAt time.Time `json:"removedAt,omitzero"`
 }
+
+// RemovedHoldDays is how long a removed item can still be brought back.
+const RemovedHoldDays = 30
+
+// HeaderMeta carries ItemHeader.Meta (base64) on uploads.
+const HeaderMeta = "X-Item-Meta"
 
 // Key returns "kind/id".
 func (h ItemHeader) Key() string { return h.Kind + "/" + h.ID }

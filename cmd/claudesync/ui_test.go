@@ -17,6 +17,7 @@ import (
 	"github.com/Simplyph0/claudesync/internal/client"
 	"github.com/Simplyph0/claudesync/internal/server"
 	"github.com/Simplyph0/claudesync/internal/syncer"
+	"github.com/Simplyph0/claudesync/internal/vault"
 )
 
 // TestScreens renders every screen; set CLAUDESYNC_SCREENS=dir to save PNGs.
@@ -39,11 +40,27 @@ func TestScreens(t *testing.T) {
 	a.win.Resize(fyne.NewSize(760, 560))
 	a.cfg = appcfg.Defaults()
 	a.cfg.DeviceName, a.cfg.TunnelURL, a.cfg.DeviceID = "Desktop", ts.URL, resp.DeviceID
-	a.eng = &syncer.Engine{API: cl, DeviceID: resp.DeviceID, StatePath: filepath.Join(t.TempDir(), "s.json"),
-		Scanner: &syncer.Scanner{Loc: claude.Locations{Home: t.TempDir(), ClaudeHome: t.TempDir()}}}
+	_, key, _ := vault.New("passphrase")
+	desk := t.TempDir()
+	os.MkdirAll(filepath.Join(desk, "claude-code-sessions"), 0o755)
+	a.eng = &syncer.Engine{API: cl, Key: key, DeviceID: resp.DeviceID, StatePath: filepath.Join(t.TempDir(), "s.json"), SnapshotDir: t.TempDir(),
+		Scanner: &syncer.Scanner{Loc: claude.Locations{Home: t.TempDir(), ClaudeHome: t.TempDir(), DesktopDir: desk},
+			AppRunning: func() bool { return true }}}
 	if err := a.eng.Init(); err != nil {
 		t.Fatal(err)
 	}
+	// Sample data from "another PC": two sessions, one of them removed.
+	other, _ := client.New("", ts.URL, "", "").Login(t.Context(), "password123", "Laptop")
+	cl2 := client.New("", ts.URL, "", other.Token)
+	for _, s := range []struct{ id, title string }{{"local_a", "Fix the parser"}, {"local_b", "Old experiment"}} {
+		it := &syncer.Item{M: syncer.Manifest{Format: syncer.FormatVersion, Kind: "session", ID: s.id, Title: s.title}}
+		blob, _ := syncer.Seal(it, key)
+		if _, err := cl2.Put(t.Context(), "session", s.id, 0, blob, syncer.SealMeta(key, "session", s.id, s.title)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl2.Remove(t.Context(), "session", "local_b")
+	_ = a.eng.Sync(t.Context()) // Claude "open": the remaining session waits
 	a.log.Printf("ClaudeSync started")
 	a.log.Printf("restore: applied 3 item(s) from other PCs")
 

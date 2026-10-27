@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ var (
 	ErrNotFound     = errors.New("not found")
 	ErrUnauthorized = errors.New("unauthorized")
 	ErrPinMismatch  = errors.New("server certificate does not match the fingerprint you confirmed")
+	ErrRemoved      = errors.New("removed from the server backup")
 )
 
 // APIError is an error message returned by the server.
@@ -206,6 +208,8 @@ func checkStatus(resp *http.Response) error {
 		return fmt.Errorf("%w: %v", ErrNotFound, apiErr)
 	case http.StatusUnauthorized:
 		return fmt.Errorf("%w: %v", ErrUnauthorized, apiErr)
+	case http.StatusGone:
+		return fmt.Errorf("%w: %v", ErrRemoved, apiErr)
 	}
 	return apiErr
 }
@@ -286,9 +290,12 @@ func (c *Client) Get(ctx context.Context, kind, id string, v int) (proto.ItemHea
 }
 
 // Put uploads a blob as the next version after base, chunking large blobs.
-func (c *Client) Put(ctx context.Context, kind, id string, base int, blob []byte) (proto.ItemHeader, error) {
+func (c *Client) Put(ctx context.Context, kind, id string, base int, blob, meta []byte) (proto.ItemHeader, error) {
 	var h proto.ItemHeader
 	hdr := map[string]string{proto.HeaderBaseVersion: strconv.Itoa(base)}
+	if len(meta) > 0 {
+		hdr[proto.HeaderMeta] = base64.StdEncoding.EncodeToString(meta)
+	}
 	path := "/api/items/" + kind + "/" + id
 	if len(blob) > proto.MaxDirectUpload {
 		var up proto.UploadStart
@@ -326,4 +333,17 @@ func decodeHeader(resp *http.Response, err error) (proto.ItemHeader, error) {
 		return h, err
 	}
 	return h, json.NewDecoder(resp.Body).Decode(&h)
+}
+
+// Remove strikes an item from the server backup (kept for
+// proto.RemovedHoldDays so it can be brought back).
+func (c *Client) Remove(ctx context.Context, kind, id string) (proto.ItemHeader, error) {
+	var h proto.ItemHeader
+	return h, c.call(ctx, "DELETE", "/api/items/"+kind+"/"+id, nil, &h)
+}
+
+// BringBack undoes Remove.
+func (c *Client) BringBack(ctx context.Context, kind, id string) (proto.ItemHeader, error) {
+	var h proto.ItemHeader
+	return h, c.call(ctx, "POST", "/api/items/"+kind+"/"+id+"/restore", nil, &h)
 }

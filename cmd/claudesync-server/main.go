@@ -274,6 +274,9 @@ func (p *program) Start(s service.Service) error {
 				return
 			case <-t.C:
 				st.CleanUploads()
+				if n := st.PurgeRemoved(time.Now()); n > 0 {
+					log.Printf("deleted %d item(s) removed more than %d days ago", n, proto.RemovedHoldDays)
+				}
 			}
 		}
 	}()
