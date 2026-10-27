@@ -69,16 +69,17 @@ jobs:
       matrix:
         # Windows is cross-compiled on Linux (much faster to start than
         # Windows runners); ARMv7 builds on the ARM64 runner, whose package
-        # mirror already carries armhf packages.
+        # mirror already carries armhf packages. Linux clients build on
+        # Ubuntu 22.04 so they only need glibc 2.35 (runs on Debian 12).
         include: >-
           ${{ fromJSON((startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && '[
             {"target":"windows-amd64","runner":"ubuntu-24.04","goos":"windows","goarch":"amd64","cc":"x86_64-w64-mingw32-clang","deps":"mingw","ext":".exe"},
             {"target":"windows-arm64","runner":"ubuntu-24.04","goos":"windows","goarch":"arm64","cc":"aarch64-w64-mingw32-clang","deps":"mingw","ext":".exe"},
-            {"target":"linux-amd64","runner":"ubuntu-24.04","goos":"linux","goarch":"amd64","cc":"","deps":"native","ext":""},
-            {"target":"linux-arm64","runner":"ubuntu-24.04-arm","goos":"linux","goarch":"arm64","cc":"","deps":"native","ext":"","smoke":true},
-            {"target":"linux-armv7","runner":"ubuntu-24.04-arm","goos":"linux","goarch":"arm","cc":"arm-linux-gnueabihf-gcc","deps":"armhf","ext":""}
+            {"target":"linux-amd64","runner":"ubuntu-22.04","goos":"linux","goarch":"amd64","cc":"","deps":"native","ext":""},
+            {"target":"linux-arm64","runner":"ubuntu-22.04-arm","goos":"linux","goarch":"arm64","cc":"","deps":"native","ext":"","smoke":true},
+            {"target":"linux-armv7","runner":"ubuntu-22.04-arm","goos":"linux","goarch":"arm","cc":"arm-linux-gnueabihf-gcc","deps":"armhf","ext":""}
           ]' || '[
-            {"target":"linux-arm64","runner":"ubuntu-24.04-arm","goos":"linux","goarch":"arm64","cc":"","deps":"native","ext":"","smoke":true}
+            {"target":"linux-arm64","runner":"ubuntu-22.04-arm","goos":"linux","goarch":"arm64","cc":"","deps":"native","ext":"","smoke":true}
           ]') }}
     runs-on: ${{ matrix.runner }}
     steps:
@@ -122,7 +123,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/apt-archives
-          key: apt-${{ matrix.target }}-v1
+          key: apt-${{ matrix.target }}-${{ matrix.runner }}-v1
       - name: GUI libraries
         if: matrix.deps != 'mingw'
         run: |
@@ -156,6 +157,15 @@ jobs:
           mkdir -p dist
           go build -trimpath -ldflags "$ldflags" -o "dist/claudesync-${{ matrix.target }}${{ matrix.ext }}" ./cmd/claudesync
           file dist/*
+      - name: Check glibc requirement
+        if: matrix.goos == 'linux'
+        run: |
+          # Debian 12 has glibc 2.36; anything newer stops the client starting there.
+          need=$(readelf -V dist/* | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -Vu | tail -1)
+          echo "needs glibc $need"
+          [ "$(printf '%s
+2.36
+' "$need" | sort -V | tail -1)" = 2.36 ] || { echo "::error::client needs glibc $need, newer than Debian 12's 2.36"; exit 1; }
       - name: GUI smoke test
         if: matrix.smoke
         run: xvfb-run -a go test ./cmd/claudesync
