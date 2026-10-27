@@ -1,5 +1,8 @@
 name: build
 
+# Releases (v* tags) and manual runs build everything. Pushes to main and
+# pull requests only run the tests plus one GUI build as a check, so a
+# release no longer builds every platform twice.
 on:
   push:
     branches: [main]
@@ -7,20 +10,39 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A newer push to the same branch or tag cancels the older run.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
+env:
+  LLVM_MINGW: "20261020" # pinned so it can be cached
+
 jobs:
-  test-and-server:
+  test:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Test sync engine and server
+          cache: false # one cache per job below; a shared one gets overwritten
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-test-${{ hashFiles('go.sum') }}-${{ github.run_id }}
+          restore-keys: |
+            go-test-${{ hashFiles('go.sum') }}-
+            go-test-
+      - name: Test sync engine, project sync and server
         run: go test ./internal/...
       - name: Build server (all platforms)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         env:
           CGO_ENABLED: "0"
         run: |
@@ -34,112 +56,119 @@ jobs:
           done
           ls -l dist
       - uses: actions/upload-artifact@v5
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         with:
           name: server
           path: dist/*
+          compression-level: 0
 
-  client-windows:
-    runs-on: windows-latest
+  clients:
+    name: client ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - name: Get llvm-mingw (C compiler for x64 and ARM64)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download -R mstorsjo/llvm-mingw --pattern '*-ucrt-x86_64.zip' -O llvm-mingw.zip
-          7z x -y llvm-mingw.zip > /dev/null
-          echo "$(cygpath -w "$PWD"/llvm-mingw-*-ucrt-x86_64/bin)" >> "$GITHUB_PATH"
-      - name: Build client
-        shell: bash
-        env:
-          CGO_ENABLED: "1"
-          GOARCH: ${{ matrix.arch }}
-        run: |
-          if [ "${{ matrix.arch }}" = arm64 ]; then export CC=aarch64-w64-mingw32-clang; else export CC=x86_64-w64-mingw32-clang; fi
-          mkdir -p dist
-          go build -trimpath -ldflags "-s -w -H=windowsgui" -o dist/claudesync-windows-${{ matrix.arch }}.exe ./cmd/claudesync
-      - uses: actions/upload-artifact@v5
-        with:
-          name: client-windows-${{ matrix.arch }}
-          path: dist/*
-
-  client-linux:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: amd64
-            runner: ubuntu-24.04
-          - name: arm64
-            runner: ubuntu-24.04-arm
+        # Windows is cross-compiled on Linux (much faster to start than
+        # Windows runners); ARMv7 builds on the ARM64 runner, whose package
+        # mirror already carries armhf packages.
+        include: >-
+          ${{ fromJSON((startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && '[
+            {"target":"windows-amd64","runner":"ubuntu-24.04","goos":"windows","goarch":"amd64","cc":"x86_64-w64-mingw32-clang","deps":"mingw","ext":".exe"},
+            {"target":"windows-arm64","runner":"ubuntu-24.04","goos":"windows","goarch":"arm64","cc":"aarch64-w64-mingw32-clang","deps":"mingw","ext":".exe"},
+            {"target":"linux-amd64","runner":"ubuntu-24.04","goos":"linux","goarch":"amd64","cc":"","deps":"native","ext":""},
+            {"target":"linux-arm64","runner":"ubuntu-24.04-arm","goos":"linux","goarch":"arm64","cc":"","deps":"native","ext":"","smoke":true},
+            {"target":"linux-armv7","runner":"ubuntu-24.04-arm","goos":"linux","goarch":"arm","cc":"arm-linux-gnueabihf-gcc","deps":"armhf","ext":""}
+          ]' || '[
+            {"target":"linux-arm64","runner":"ubuntu-24.04-arm","goos":"linux","goarch":"arm64","cc":"","deps":"native","ext":"","smoke":true}
+          ]') }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: GUI build dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
+          cache: false
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ matrix.target }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
+          restore-keys: |
+            go-${{ matrix.target }}-${{ hashFiles('go.sum') }}-
+            go-${{ matrix.target }}-
+
+      - name: Cache llvm-mingw
+        if: matrix.deps == 'mingw'
+        id: mingw
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-mingw
+          key: llvm-mingw-${{ env.LLVM_MINGW }}-ubuntu-x86_64
+      - name: Get llvm-mingw (C compiler for Windows x64 and ARM64)
+        if: matrix.deps == 'mingw' && steps.mingw.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$LLVM_MINGW" -R mstorsjo/llvm-mingw \
+            --pattern "llvm-mingw-$LLVM_MINGW-ucrt-ubuntu-22.04-x86_64.tar.xz" -O /tmp/llvm-mingw.tar.xz
+          mkdir -p ~/llvm-mingw
+          tar -xJf /tmp/llvm-mingw.tar.xz -C ~/llvm-mingw --strip-components=1
+      - name: Add llvm-mingw to PATH
+        if: matrix.deps == 'mingw'
+        run: echo "$HOME/llvm-mingw/bin" >> "$GITHUB_PATH"
+
+      - name: Cache downloaded packages
+        if: matrix.deps != 'mingw'
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-${{ matrix.target }}-v1
+      - name: GUI libraries
+        if: matrix.deps != 'mingw'
+        run: |
+          # Skip the slow man-page index rebuild and unrelated package repositories.
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo find /etc/apt/sources.list.d -type f ! -name ubuntu.sources -delete
+          mkdir -p ~/apt-archives/partial
+          apt="sudo apt-get -qq -o Dir::Cache::Archives=$HOME/apt-archives -o Acquire::Languages=none -o Acquire::Retries=3"
+          if [ "${{ matrix.deps }}" = armhf ]; then
+            sudo dpkg --add-architecture armhf
+            pkgs="gcc-arm-linux-gnueabihf libc6-dev-armhf-cross pkg-config libgl1-mesa-dev:armhf libx11-dev:armhf libxcursor-dev:armhf
+              libxrandr-dev:armhf libxinerama-dev:armhf libxi-dev:armhf libxxf86vm-dev:armhf libxkbcommon-dev:armhf libwayland-dev:armhf"
+          else
+            pkgs="libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev"
+          fi
+          $apt update
+          $apt install -y --no-install-recommends $pkgs
+          sudo chown -R "$USER" ~/apt-archives
+
       - name: Build client
         env:
           CGO_ENABLED: "1"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: "7"
         run: |
+          [ -n "${{ matrix.cc }}" ] && export CC="${{ matrix.cc }}"
+          [ "${{ matrix.deps }}" = armhf ] && export PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig
+          ldflags="-s -w"
+          [ "${{ matrix.goos }}" = windows ] && ldflags="$ldflags -H=windowsgui"
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w" -o dist/claudesync-linux-${{ matrix.name }} ./cmd/claudesync
+          go build -trimpath -ldflags "$ldflags" -o "dist/claudesync-${{ matrix.target }}${{ matrix.ext }}" ./cmd/claudesync
+          file dist/*
       - name: GUI smoke test
+        if: matrix.smoke
         run: xvfb-run -a go test ./cmd/claudesync
       - uses: actions/upload-artifact@v5
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         with:
-          name: client-linux-${{ matrix.name }}
+          name: client-${{ matrix.target }}
           path: dist/*
-
-  client-linux-armv7:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - name: armhf cross toolchain and libraries
-        run: |
-          # The default mirrors have no armhf packages; add Ubuntu Ports for armhf only.
-          sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
-          . /etc/os-release
-          printf 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: %s %s-updates %s-security\nComponents: main universe\nArchitectures: armhf\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' \
-            "$VERSION_CODENAME" "$VERSION_CODENAME" "$VERSION_CODENAME" | sudo tee /etc/apt/sources.list.d/armhf.sources
-          sudo dpkg --add-architecture armhf
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf pkg-config \
-            libgl1-mesa-dev:armhf libx11-dev:armhf libxcursor-dev:armhf libxrandr-dev:armhf \
-            libxinerama-dev:armhf libxi-dev:armhf libxxf86vm-dev:armhf libxkbcommon-dev:armhf libwayland-dev:armhf
-      - name: Build client
-        env:
-          CGO_ENABLED: "1"
-          GOOS: linux
-          GOARCH: arm
-          GOARM: "7"
-          CC: arm-linux-gnueabihf-gcc
-          PKG_CONFIG_PATH: /usr/lib/arm-linux-gnueabihf/pkgconfig
-        run: |
-          mkdir -p dist
-          go build -trimpath -ldflags "-s -w" -o dist/claudesync-linux-armv7 ./cmd/claudesync
-          file dist/claudesync-linux-armv7
-      - uses: actions/upload-artifact@v5
-        with:
-          name: client-linux-armv7
-          path: dist/*
+          compression-level: 0
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test-and-server, client-windows, client-linux, client-linux-armv7]
+    needs: [test, clients]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v5
@@ -149,4 +178,6 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* -R "${{ github.repository }}" --title "${{ github.ref_name }}" --generate-notes
+        run: |
+          ls -l dist
+          gh release create "${{ github.ref_name }}" dist/* -R "${{ github.repository }}" --title "${{ github.ref_name }}" --generate-notes
