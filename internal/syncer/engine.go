@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Simplyph0/claudesync/internal/claude"
 	"github.com/Simplyph0/claudesync/internal/client"
 	"github.com/Simplyph0/claudesync/internal/proto"
 )
@@ -686,20 +685,6 @@ func (e *Engine) WaitingForApp() int {
 		}
 	}
 	return n
-}
-
-// CloseAndApply asks Claude to quit normally (never force-closes it), waits
-// for it to exit, applies waiting restores, then opens Claude again.
-func (e *Engine) CloseAndApply(ctx context.Context) error {
-	apps, err := claude.CloseDesktop(30 * time.Second)
-	if err != nil {
-		return err
-	}
-	serr := e.Sync(ctx)
-	if err := claude.Relaunch(apps); err != nil {
-		return errors.Join(serr, fmt.Errorf("couldn't reopen Claude (open it yourself): %w", err))
-	}
-	return serr
 }
 
 // ErrCloseApp means the desktop app must be closed for this action.

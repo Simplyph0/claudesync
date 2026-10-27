@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -15,7 +16,7 @@ import (
 
 // ErrStillRunning means Claude didn't quit when asked. ClaudeSync never
 // force-closes it; the user has to quit it themselves.
-var ErrStillRunning = errors.New("Claude didn't close. Quit it from its menu (File → Quit), and ClaudeSync loads the updates as soon as it has closed")
+var ErrStillRunning = errors.New("Claude is still open")
 
 // App is a running desktop app instance (its main process).
 type App struct {
@@ -92,26 +93,27 @@ func DesktopRunning() bool {
 	return err != nil || len(apps) > 0
 }
 
-// CloseDesktop asks the app to quit the normal way (like File → Quit) and
-// waits for it. It never kills it: if the app is still open after wait, it
-// returns ErrStillRunning.
-func CloseDesktop(wait time.Duration) ([]App, error) {
-	apps, err := RunningApps()
-	if err != nil || len(apps) == 0 {
-		return apps, err
-	}
+// AskToQuit asks each app to close the normal way. It never kills anything.
+// On Windows this is the same as clicking the window's ✕, which Claude may
+// answer by hiding in the tray, so callers must not assume it worked.
+func AskToQuit(apps []App) {
 	for _, a := range apps {
 		askToQuit(a.PID)
 	}
-	deadline := time.Now().Add(wait)
-	for time.Now().Before(deadline) {
-		time.Sleep(time.Second)
+}
+
+// WaitClosed waits up to d for the app to exit, then a moment more for it to
+// finish writing its files. It reports whether it closed.
+func WaitClosed(ctx context.Context, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) && ctx.Err() == nil {
 		if !DesktopRunning() {
-			time.Sleep(2 * time.Second) // let it finish writing its files
-			return apps, nil
+			time.Sleep(2 * time.Second)
+			return !DesktopRunning()
 		}
+		time.Sleep(time.Second)
 	}
-	return apps, ErrStillRunning
+	return false
 }
 
 func askToQuit(pid int32) {

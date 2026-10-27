@@ -46,6 +46,8 @@ type App struct {
 	trayMenu  *fyne.Menu
 	refreshUI func()
 	schedOnce sync.Once
+	reopen    []claude.App // Claude as it was when ClaudeSync asked it to quit
+	applying  bool
 }
 
 func main() {
@@ -206,12 +208,17 @@ func snapshotDir() string { return filepath.Join(appcfg.Dir(), "snapshots") }
 // watchAppClose applies waiting updates as soon as Claude is closed, however
 // it was closed.
 func (a *App) watchAppClose() {
-	for range time.Tick(15 * time.Second) {
+	for range time.Tick(3 * time.Second) {
 		e := a.engine()
-		if e != nil && e.WaitingForApp() > 0 && !claude.DesktopRunning() {
-			a.log.Printf("Claude is closed; loading the waiting updates")
-			a.doSync(false)
+		if e == nil || e.WaitingForApp() == 0 || claude.DesktopRunning() {
+			continue
 		}
+		time.Sleep(2 * time.Second) // let Claude finish writing its files
+		if claude.DesktopRunning() {
+			continue
+		}
+		a.log.Printf("Claude is closed; loading the waiting updates")
+		a.applyAndReopen()
 	}
 }
 
@@ -309,8 +316,8 @@ func (a *App) afterRun(what string, err error) {
 func (a *App) askRestart(n int) {
 	a.showWindow()
 	msg := fmt.Sprintf("%d session(s) from your other PCs are ready.\n\n"+
-		"They load the next time Claude is closed: quit it whenever suits you, and ClaudeSync adds them straight away. "+
-		"This PC's own sessions are already backed up, and anything replaced is saved in a snapshot first.\n\n"+
+		"They load the next time Claude is closed: quit it whenever suits you.\n"+
+		"This PC's own sessions are already backed up, and anything replaced is saved first.\n\n"+
 		"Close Claude now and reopen it with the updates?", n)
 	dialog.ShowConfirm("Updates ready", msg, func(ok bool) {
 		if ok {
@@ -319,28 +326,78 @@ func (a *App) askRestart(n int) {
 	}, a.win)
 }
 
-// closeAndApply asks Claude to quit normally, loads the updates, and reopens it.
+const quitHelp = "If Claude only hides (it can keep running in the tray), quit it yourself:\n" +
+	"right-click its tray icon → Quit, or use File → Quit in Claude.\n\n" +
+	"Chats running in Claude stop while it's closed.\n" +
+	"The updates load the moment Claude has closed, then Claude reopens."
+
+// closeAndApply asks Claude to quit (never forcing it), and from then on the
+// watcher loads the updates as soon as Claude is closed and reopens it.
 func (a *App) closeAndApply() {
 	e := a.engine()
 	if e == nil {
 		return
 	}
-	fyne.Do(func() { a.setTrayIcon(iconBusy) })
-	err := e.CloseAndApply(a.ctx)
-	if errors.Is(err, claude.ErrStillRunning) {
-		a.afterRun("close Claude", nil)
-		fyne.Do(func() { dialog.ShowInformation("Claude is still open", err.Error(), a.win) })
+	apps, err := claude.RunningApps()
+	if err != nil {
+		a.log.Printf("couldn't check whether Claude is running: %v", err)
+	}
+	if len(apps) == 0 {
+		a.log.Printf("Claude is already closed; loading updates")
+		a.applyAndReopen()
 		return
 	}
-	a.afterRun("close and load updates", err)
-	if err == nil {
-		a.mu.Lock()
-		a.lastAsked = 0
-		a.mu.Unlock()
-		a.notify("ClaudeSync", "Claude reopened with your latest sessions.")
-	} else {
-		fyne.Do(func() { dialog.ShowError(err, a.win) })
+	a.mu.Lock()
+	first := a.reopen == nil
+	a.reopen = apps
+	a.mu.Unlock()
+	if first {
+		a.log.Printf("asked Claude to quit so the updates can load")
 	}
+	claude.AskToQuit(apps)
+	fyne.Do(func() {
+		a.showWindow()
+		dialog.ShowInformation("Waiting for Claude to close", "ClaudeSync has asked Claude to quit.\n\n"+quitHelp, a.win)
+	})
+	if claude.WaitClosed(a.ctx, 20*time.Second) {
+		a.applyAndReopen()
+		return
+	}
+	a.log.Printf("Claude is still open (probably in the tray); the updates load as soon as you quit it")
+}
+
+// applyAndReopen loads waiting updates now that Claude is closed and, if
+// ClaudeSync asked Claude to quit, opens it again.
+func (a *App) applyAndReopen() {
+	a.mu.Lock()
+	if a.applying {
+		a.mu.Unlock()
+		return
+	}
+	a.applying = true
+	apps := a.reopen
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.applying = false
+		a.mu.Unlock()
+	}()
+
+	a.doSync(false)
+	a.mu.Lock()
+	a.reopen = nil
+	a.lastAsked = 0
+	a.mu.Unlock()
+	if len(apps) == 0 {
+		return
+	}
+	if err := claude.Relaunch(apps); err != nil {
+		a.log.Printf("couldn't reopen Claude: %v", err)
+		a.notify("ClaudeSync", "Updates loaded. Open Claude to see them.")
+		return
+	}
+	a.log.Printf("updates loaded; reopened Claude")
+	a.notify("ClaudeSync", "Updates loaded and Claude reopened.")
 }
 
 // runScan prints what this PC would sync, without contacting a server.
