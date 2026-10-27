@@ -163,9 +163,7 @@ jobs:
           # Debian 12 has glibc 2.36; anything newer stops the client starting there.
           need=$(readelf -V dist/* | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -Vu | tail -1)
           echo "needs glibc $need"
-          [ "$(printf '%s
-2.36
-' "$need" | sort -V | tail -1)" = 2.36 ] || { echo "::error::client needs glibc $need, newer than Debian 12's 2.36"; exit 1; }
+          [ "$(printf '%s\n' "$need" 2.36 | sort -V | tail -1)" = 2.36 ] || { echo "::error::client needs glibc $need, newer than Debian 12's 2.36"; exit 1; }
       - name: GUI smoke test
         if: matrix.smoke
         run: xvfb-run -a go test ./cmd/claudesync
