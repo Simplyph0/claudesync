@@ -42,6 +42,7 @@ type scanner struct {
 	cache   map[string]cacheEntry
 	now     time.Time
 	git     bool
+	extra   []string // the project's own "don't sync these" lines
 }
 
 func (s *scanner) scan() (*scanResult, error) {
@@ -55,6 +56,7 @@ func (s *scanner) scan() (*scanResult, error) {
 	res := &scanResult{files: map[string]*Entry{}, unsettled: map[string]bool{}}
 	m := NewMatcher()
 	m.LoadDir(s.root, "", s.git)
+	m.AddLines(s.extra)
 	newCache := map[string]cacheEntry{}
 	lowerSeen := map[string]string{}
 

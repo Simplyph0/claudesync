@@ -425,6 +425,7 @@ func TestDeletesAndBigChangesAsk(t *testing.T) {
 	c.sync()
 	eq(t, "C has the files", len(c.list()), 5)
 	os.RemoveAll(c.folder)
+	os.MkdirAll(c.folder, 0o755) // emptied, not missing
 	c.sync()
 	if d := c.status().Decision; d == nil || d.Kind != "local-deletes" {
 		t.Fatalf("emptied folder didn't ask: %+v", d)

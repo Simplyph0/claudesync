@@ -208,7 +208,7 @@ This stops ClaudeSync merging the files of two different branches together.
 
 ### A project this PC doesn't have yet
 
-Projects tab, "On the server, not on this PC": **Download to…** opens a folder picker,
+Projects tab → **On the server**: **Download to…** opens a folder picker,
 pre-filled with your projects folder plus the project name. The files download, and
 the folder is then linked, so it syncs from then on.
 
@@ -257,7 +257,7 @@ Every situation where ClaudeSync could guess wrong has a setting (Settings → P
 | Project over the size limit | Always asks once | |
 | This PC's project folder is suddenly empty | **Always asks**: delete on other PCs too, or put the files back here | |
 
-Questions show up in Projects → **Needs you**. A project waiting for an answer doesn't
+Questions show up on the folder's own card in Projects → **My folders**, with the buttons to answer them, and in a desktop notification. A project waiting for an answer doesn't
 sync until you answer; nothing else is held up.
 
 ## Safety rules (same spirit as the rest of ClaudeSync)
@@ -292,6 +292,35 @@ sync until you answer; nothing else is held up.
 - **Recover tab:** gains **Project trash**, with search and restore per file or per sync.
 - **History tab:** projects appear like sessions, with versions. **Restore this version**
   writes that version into the folder (the current files go to trash first).
+
+## The Projects tab (v0.5.0)
+
+**My folders** is one card per folder:
+
+- A coloured status (Up to date, Backed up, Syncing…, Needs you, Problem, Paused, Off), what it's doing
+  right now ("Sending file 12 of 340"), when it was last checked, how many files and how big, and what the
+  last change did ("3 sent to the server, 1 received").
+- Questions (first link, clashes, deletions, git mismatch, too large) appear on the card itself, each with a
+  plain explanation of what the buttons do.
+- Errors are explained in plain words with **what to do**, with the raw error under "Technical details".
+  A desktop notification is shown once per new problem or question, and the tray icon turns red meanwhile.
+- **Sync now** syncs just that folder.
+- **Details** has the folder's settings (Off / Back up only / Sync, clash choice, pause), a
+  **Don't sync these** list (gitignore-style, this PC only), **Open folder**, **Change folder…**, files that were
+  left out and why, a **Recent activity** log, and **Stop managing this folder**.
+
+**Add folder…** looks at the folder first: file count and size, whether it's a git repository (and whether git
+already carries it), what is skipped on purpose, files that look like passwords or keys, names Windows can't
+have, files over the limit, and whether it is over the project size limit. Then you choose Back up only or Sync.
+
+Safety checks that explain themselves instead of failing quietly:
+
+- A folder that **goes missing** (an unplugged drive, a rename) is never recreated empty: ClaudeSync stops with
+  "The folder … isn't there" and nothing is changed or deleted anywhere. (A folder that is there but empty still
+  asks before deleting anything elsewhere.)
+- A folder can't be a whole drive, your home folder, ClaudeSync's own data, the same as another project, or
+  inside or around another project (syncing both would copy files twice).
+- "Don't sync these" never makes other PCs think those files were deleted: they are simply left alone on this PC.
 
 ## Build plan
 

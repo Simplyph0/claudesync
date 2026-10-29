@@ -75,6 +75,7 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 	restartBtn.Importance = widget.HighImportance
 	bannerBox := container.NewVBox(banner, restartBtn)
 	safety := widget.NewLabel("")
+	projLine := wrapLabel("")
 
 	backupBtn := widget.NewButton("Back up now", func() { go a.doBackup() })
 	restoreBtn := widget.NewButton("Sync now", func() { go a.doSync(true) })
@@ -130,6 +131,7 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 		} else {
 			safety.SetText("Backs up this PC before every sync. Never deletes; replaced files are snapshotted.")
 		}
+		a.projectSummaryLine(projLine)
 		errLbl.SetText(s.LastError)
 		pending = s.Pending
 		list.Refresh()
@@ -149,7 +151,7 @@ func (a *App) statusTab() (fyne.CanvasObject, func()) {
 			errLbl.SetText(strings.TrimSpace(s.LastError + "\nClaude's session format changed after an update. Backups continue, but restoring desktop sessions is paused until ClaudeSync is updated."))
 		}
 	}
-	top := container.NewVBox(summary, safety, container.NewHBox(backupBtn, restoreBtn), errLbl, bannerBox,
+	top := container.NewVBox(summary, projLine, safety, container.NewHBox(backupBtn, restoreBtn), errLbl, bannerBox,
 		container.NewBorder(nil, nil, bold("Waiting to restore"), skippedBtn))
 	return container.NewPadded(container.NewBorder(top, nil, nil, nil, list)), refresh
 }
@@ -214,7 +216,7 @@ func (a *App) chatFoldersTab() (fyne.CanvasObject, func()) {
 		rows = append(rows, mapped...)
 		list.Refresh()
 	}
-	help := wrapLabel("Sessions from other PCs are matched to a project folder here by git remote, then by folder name. If a project isn't found, choose its folder; its sessions restore right after.")
+	help := wrapLabel("Where chats from your other PCs open on this PC. Chats are matched to a folder here by git remote, then by folder name; if one isn't found, choose its folder and its chats load right after. This is only about chats. To back up or sync the files in a folder, use My folders.")
 	return container.NewPadded(container.NewBorder(help, nil, nil, nil, list)), refresh
 }
 

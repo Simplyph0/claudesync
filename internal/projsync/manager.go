@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -72,12 +73,14 @@ func DefaultSettings() Settings {
 
 // Project is one folder's configuration on this PC.
 type Project struct {
-	Key        string `json:"key"`  // same key as sessions use (git remote or folder name)
-	Name       string `json:"name"` // shown in lists
-	Folder     string `json:"folder"`
-	Mode       string `json:"mode"`
-	Clash      string `json:"clash,omitempty"`      // "" = use the PC-wide setting
-	AllowLarge bool   `json:"allowLarge,omitempty"` // OK'd going over the size limit
+	Key        string   `json:"key"`  // same key as sessions use (git remote or folder name)
+	Name       string   `json:"name"` // shown in lists
+	Folder     string   `json:"folder"`
+	Mode       string   `json:"mode"`
+	Clash      string   `json:"clash,omitempty"`      // "" = use the PC-wide setting
+	AllowLarge bool     `json:"allowLarge,omitempty"` // OK'd going over the size limit
+	Paused     bool     `json:"paused,omitempty"`     // stays set up, but isn't synced until resumed
+	Ignore     []string `json:"ignore,omitempty"`     // "don't sync these" lines (gitignore style), on this PC only
 }
 
 // Decision is something waiting for the user because a setting says "ask".
@@ -119,6 +122,10 @@ type pstate struct {
 	Status      string                `json:"status"`
 	Error       string                `json:"error,omitempty"`
 	Skipped     []Skip                `json:"skipped,omitempty"`
+	Fix         string                `json:"fix,omitempty"`    // what to do about Error
+	Detail      string                `json:"detail,omitempty"` // the raw error, for bug reports
+	Last        *Result               `json:"last,omitempty"`
+	Events      []Event               `json:"events,omitempty"`
 }
 
 // Status is what the GUI shows for a project.
@@ -130,6 +137,12 @@ type Status struct {
 	Decision *Decision
 	Clashes  []Clash
 	Skipped  []Skip
+	Fix      string  // what to do about Error
+	Detail   string  // the raw error
+	Progress string  // what a running sync is doing
+	Active   bool    // a sync is running now
+	Last     *Result // what the last finished sync did
+	Events   []Event // newest last
 }
 
 type Manager struct {
@@ -146,6 +159,9 @@ type Manager struct {
 	projects map[string]*Project
 	states   map[string]*pstate
 	running  sync.Mutex
+	active   map[string]bool    // projects being synced now
+	cur      map[string]*Result // what the running syncs have done so far
+	progress map[string]string
 }
 
 // Open loads the project list and state from dir.
@@ -269,7 +285,12 @@ func (m *Manager) Projects() []Status {
 	var out []Status
 	for _, p := range m.projects {
 		st := m.stateLocked(p.Key)
-		s := Status{Project: *p, LastSync: st.LastSync, Status: st.Status, Error: st.Error, Decision: st.Decision, Skipped: st.Skipped}
+		s := Status{Project: *p, LastSync: st.LastSync, Status: st.Status, Error: st.Error, Decision: st.Decision, Skipped: st.Skipped,
+			Fix: st.Fix, Detail: st.Detail, Progress: m.progress[p.Key], Active: m.active[p.Key], Events: append([]Event(nil), st.Events...)}
+		if st.Last != nil {
+			l := *st.Last
+			s.Last = &l
+		}
 		for _, c := range st.Clashes {
 			s.Clashes = append(s.Clashes, *c)
 		}
@@ -301,6 +322,11 @@ func (m *Manager) SetProject(p Project) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if old := m.projects[p.Key]; old == nil || !samePath(old.Folder, p.Folder) {
+		if err := m.validateLocked(p); err != nil {
+			return err
+		}
+	}
 	if old := m.projects[p.Key]; old != nil && old.Folder != p.Folder {
 		// a different folder: start over with this folder (nothing on disk changes)
 		_ = os.Remove(m.basePath(p.Key))
@@ -397,7 +423,7 @@ func (m *Manager) SyncAll(ctx context.Context) error {
 	m.mu.Lock()
 	var keys []string
 	for k, p := range m.projects {
-		if p.Mode == ModeBackup || p.Mode == ModeSync {
+		if (p.Mode == ModeBackup || p.Mode == ModeSync) && !p.Paused {
 			keys = append(keys, k)
 		}
 	}
@@ -427,10 +453,20 @@ func (m *Manager) setStatus(key, status string, err error) {
 	defer m.mu.Unlock()
 	st := m.stateLocked(key)
 	st.Status = status
-	st.Error = ""
+	st.Error, st.Fix, st.Detail = "", "", ""
 	if err != nil {
 		st.Error = err.Error()
 	}
+	_ = m.saveStateLocked(key)
+}
+
+// setProblem records a failed sync in plain words, with what to do about it.
+func (m *Manager) setProblem(key string, err error, folder string) {
+	pr := Explain(err, folder)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.stateLocked(key)
+	st.Status, st.Error, st.Fix, st.Detail = "error", pr.What, pr.Fix, err.Error()
 	_ = m.saveStateLocked(key)
 }
 
@@ -446,32 +482,46 @@ func (m *Manager) Sync(ctx context.Context, key string) error {
 	}
 	p := *pp
 	m.mu.Unlock()
-	var err error
-	switch p.Mode {
-	case ModeBackup:
-		err = m.backup(ctx, p)
-	case ModeSync:
-		err = m.sync(ctx, p)
-	default:
+	if p.Mode != ModeBackup && p.Mode != ModeSync {
 		return nil
 	}
+	if p.Paused {
+		m.setStatus(key, "paused", nil)
+		return nil
+	}
+	m.begin(key)
+	defer m.end(key)
+	var err error
+	if p.Mode == ModeBackup {
+		err = m.backup(ctx, p)
+	} else {
+		err = m.sync(ctx, p)
+	}
 	if err != nil {
-		m.setStatus(key, "error", err)
+		m.setProblem(key, err, p.Folder)
+		m.event(key, "error", "%s", Explain(err, p.Folder).What)
 		m.logf("project %s: %v", p.Name, err)
 	}
 	return err
 }
 
 func (m *Manager) scanFolder(p Project, st *pstate) (*scanResult, error) {
-	sc := &scanner{root: p.Folder, keys: m.Keys, maxFile: int64(m.Settings.MaxFileMB) << 20, cache: st.Cache, now: m.Now(), git: gitDir(p.Folder) != ""}
+	sc := &scanner{root: p.Folder, keys: m.Keys, maxFile: int64(m.Settings.MaxFileMB) << 20, cache: st.Cache, now: m.Now(), git: gitDir(p.Folder) != "", extra: p.Ignore}
 	res, err := sc.scan()
 	if err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
 	st.Cache = sc.cache
+	if len(res.skipped) != len(st.Skipped) && len(res.skipped) > 0 {
+		m.eventLocked(p.Key, "warn", "%d file(s) are left out: %s (%s)", len(res.skipped), res.skipped[0].Path, res.skipped[0].Why)
+	}
 	st.Skipped = res.skipped
 	m.mu.Unlock()
+	nf, nb := countFiles(res.files)
+	rs := m.res(p.Key)
+	rs.Files, rs.Bytes = nf, nb
+	m.setProgress(p.Key, "Comparing with the server…")
 	return res, nil
 }
 
@@ -483,7 +533,8 @@ func (m *Manager) waitFor(key string, d *Decision) error {
 	d.Created = m.Now()
 	st.Decision = d
 	st.Status = "waiting for your decision"
-	st.Error = ""
+	st.Error, st.Fix, st.Detail = "", "", ""
+	m.eventLocked(key, "warn", "Waiting for you: %s", d.Message)
 	m.logf("project %s: %s", key, d.Message)
 	return m.saveStateLocked(key)
 }
@@ -538,6 +589,12 @@ func (m *Manager) backup(ctx context.Context, p Project) error {
 			return nil
 		}
 	}
+	var before map[string]*Entry
+	if base != nil {
+		before = base.Files
+	}
+	nUp := changedFiles(before, man.Files)
+	m.res(p.Key).Uploaded = nUp
 	done, err := m.uploadChunks(ctx, p, man.Files, keysOf(man.Files))
 	if err != nil {
 		return err
@@ -592,7 +649,15 @@ func (m *Manager) finish(key, item string, version int, base *Manifest, status s
 	st.BaseVersion, st.BaseItem = version, item
 	st.LastSync = m.Now()
 	st.Status = status
-	st.Error = ""
+	st.Error, st.Fix, st.Detail = "", "", ""
+	if r := m.cur[key]; r != nil {
+		cp := *r
+		cp.Time, cp.Skipped = m.Now(), len(st.Skipped)
+		st.Last = &cp
+		if cp.Changed() {
+			m.eventLocked(key, "info", "Synced: %s", cp.Summary())
+		}
+	}
 	if clashes != nil {
 		st.Clashes = clashes
 	}
@@ -639,6 +704,15 @@ func (m *Manager) uploadChunks(ctx context.Context, p Project, files map[string]
 	}
 	capBytes := int64(m.Settings.UploadCapMB) << 20
 	var sent int64
+	wantFiles, doneFiles := 0, 0
+	for _, path := range paths {
+		for _, c := range files[path].Chunks {
+			if need[c] {
+				wantFiles++
+				break
+			}
+		}
+	}
 	for _, path := range paths {
 		e := files[path]
 		want := false
@@ -648,6 +722,8 @@ func (m *Manager) uploadChunks(ctx context.Context, p Project, files map[string]
 		if !want {
 			continue
 		}
+		doneFiles++
+		m.setProgress(p.Key, "Sending file %d of %d: %s", doneFiles, wantFiles, path)
 		data, err := os.ReadFile(filepath.Join(p.Folder, filepath.FromSlash(path)))
 		if err != nil || fileHash(data) != e.Hash {
 			return false, fmt.Errorf("%s changed while uploading; trying again next sync", path)
@@ -788,13 +864,14 @@ func conflictName(rel, device string, t time.Time) string {
 
 // sync is the two-way sync of one project.
 func (m *Manager) sync(ctx context.Context, p Project) error {
-	if err := os.MkdirAll(p.Folder, 0o755); err != nil {
-		return err
-	}
 	id := itemID(p.Key)
 	m.mu.Lock()
 	st := m.stateLocked(p.Key)
+	baseVersion := st.BaseVersion
 	m.mu.Unlock()
+	if err := checkFolder(p.Folder, baseVersion); err != nil {
+		return err
+	}
 	R, rh, err := m.remote(ctx, id)
 	if err != nil {
 		return err
@@ -884,7 +961,7 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 					pv.Differ++
 				}
 			}
-			for path := range R.Files {
+			for path := range p.visible(R.Files) {
 				if local[path] == nil {
 					pv.OnlyServer++
 				}
@@ -899,7 +976,7 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	if B != nil {
 		baseFiles = B.Files
 	}
-	acts := plan(local, files(R), baseFiles)
+	acts := plan(local, p.visible(files(R)), p.visible(baseFiles))
 	switch linkChoice {
 	case LinkServer: // make this folder match the server
 		for i := range acts {
@@ -1042,6 +1119,7 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 					N.Files[a.path] = me
 					uploads = append(uploads, a.path)
 					m.logf("project %s: merged changes from both PCs in %s", p.Name, a.path)
+					m.res(p.Key).Merged++
 					continue
 				}
 			}
@@ -1101,7 +1179,8 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	}
 
 	// 3. Change this PC's folder (everything replaced or removed goes to trash first).
-	for _, wr := range writes {
+	for i, wr := range writes {
+		m.setProgress(p.Key, "Receiving file %d of %d: %s", i+1, len(writes), wr.rel)
 		data := wr.data
 		if data == nil && !wr.e.Dir && wr.e.Link == "" {
 			if data, err = m.fetch(ctx, wr.e); err != nil {
@@ -1123,6 +1202,19 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	}
 	if w.batch.count() > 0 {
 		m.logf("project %s: %d replaced/removed file(s) saved to trash", p.Name, w.batch.count())
+	}
+
+	rs := m.res(p.Key)
+	rs.Uploaded = len(uploads) - rs.Merged
+	for _, wr := range writes {
+		if wr.data == nil && !w.failed[wr.rel] {
+			rs.Downloaded++
+		}
+	}
+	for _, rel := range removes {
+		if !w.failed[rel] {
+			rs.Removed++
+		}
 	}
 
 	// 4. Publish the new version if this PC changed anything.
@@ -1320,4 +1412,26 @@ func (m *Manager) FolderForItem(id string) string {
 		}
 	}
 	return ""
+}
+
+// checkFolder makes sure a project's folder is there before syncing. A folder
+// that has synced before and is now gone is never quietly recreated: that is
+// usually a drive that isn't plugged in, and an empty folder would look like
+// "everything was deleted".
+func checkFolder(folder string, syncedBefore int) error {
+	info, err := os.Stat(folder)
+	switch {
+	case err == nil:
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a folder", folder)
+		}
+		return nil
+	case errors.Is(err, fs.ErrNotExist):
+		if _, perr := os.Stat(filepath.Dir(folder)); perr != nil || syncedBefore > 0 {
+			return err
+		}
+		return os.MkdirAll(folder, 0o755)
+	default:
+		return err
+	}
 }

@@ -16,6 +16,9 @@ var defaultIgnores = []string{
 	".DS_Store", "Thumbs.db", "desktop.ini", "*.swp", "~$*", "*.claudesync-tmp",
 }
 
+// DefaultIgnores lists what is always skipped, for showing to the user.
+func DefaultIgnores() []string { return append([]string(nil), defaultIgnores...) }
+
 type rule struct {
 	re      *regexp.Regexp
 	negate  bool
@@ -53,6 +56,13 @@ func (m *Matcher) LoadDir(root, rel string, git bool) {
 			m.add(sc.Text(), rel)
 		}
 		f.Close()
+	}
+}
+
+// AddLines adds gitignore-style lines that apply from the project root.
+func (m *Matcher) AddLines(lines []string) {
+	for _, l := range lines {
+		m.add(l, "")
 	}
 }
 

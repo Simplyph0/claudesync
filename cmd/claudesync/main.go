@@ -41,14 +41,15 @@ type App struct {
 	sec appcfg.Secrets
 	eng *syncer.Engine
 
-	ctx       context.Context
-	resched   chan struct{}
-	lastAsked int
-	trayMenu  *fyne.Menu
-	refreshUI func()
-	schedOnce sync.Once
-	reopen    []claude.App // Claude as it was when ClaudeSync asked it to quit
-	applying  bool
+	ctx        context.Context
+	resched    chan struct{}
+	lastAsked  int
+	trayMenu   *fyne.Menu
+	refreshUI  func()
+	schedOnce  sync.Once
+	reopen     []claude.App      // Claude as it was when ClaudeSync asked it to quit
+	projAlerts map[string]string // what each project folder last told the user about
+	applying   bool
 }
 
 func main() {
@@ -309,6 +310,7 @@ func (a *App) doSync(manual bool) {
 	a.addDefaultProjects()
 	err := e.Sync(a.ctx)
 	a.afterRun("sync", err)
+	a.notifyProjects()
 	n := e.WaitingForApp()
 	a.mu.Lock()
 	ask := n > 0 && (manual || n > a.lastAsked)
@@ -316,6 +318,45 @@ func (a *App) doSync(manual bool) {
 	a.mu.Unlock()
 	if ask {
 		fyne.Do(func() { a.askRestart(n) })
+	}
+}
+
+// notifyProjects tells you, once per problem, about project folders that
+// need an answer or can't sync, and turns the tray icon red while any do.
+func (a *App) notifyProjects() {
+	pm := a.projects()
+	if pm == nil {
+		return
+	}
+	attention := false
+	for _, s := range pm.Projects() {
+		sig, title, body := "", "", ""
+		switch {
+		case s.Paused || s.Mode == projsync.ModeOff:
+		case s.Decision != nil:
+			sig, title, body = "ask:"+s.Decision.Message, "ClaudeSync: "+s.Name+" needs you", s.Decision.Message
+		case len(s.Clashes) > 0:
+			sig, title, body = fmt.Sprintf("clash:%d:%s", len(s.Clashes), s.Clashes[0].Path), "ClaudeSync: "+s.Name+" needs you",
+				fmt.Sprintf("%s changed on two PCs. Open ClaudeSync → Projects to choose.", s.Clashes[0].Path)
+		case s.Error != "":
+			sig, title, body = "err:"+s.Error, "ClaudeSync: can't sync "+s.Name, s.Error+" "+s.Fix
+		}
+		a.mu.Lock()
+		if a.projAlerts == nil {
+			a.projAlerts = map[string]string{}
+		}
+		last := a.projAlerts[s.Key]
+		a.projAlerts[s.Key] = sig
+		a.mu.Unlock()
+		if sig != "" {
+			attention = true
+			if sig != last {
+				a.notify(title, body)
+			}
+		}
+	}
+	if attention {
+		fyne.Do(func() { a.setTrayIcon(iconWarn) })
 	}
 }
 
@@ -499,8 +540,20 @@ func (a *App) addDefaultProjects() {
 		if mode == projsync.ModeSync && projsync.HasGitRemote(folder) && c.ProjectGitDefault != projsync.ModeSync {
 			mode = c.ProjectGitDefault
 		}
-		if err := e.ProjectSync.SetProject(projsync.Project{Key: key, Name: filepath.Base(folder), Folder: folder, Mode: mode}); err == nil {
+		err := e.ProjectSync.SetProject(projsync.Project{Key: key, Name: filepath.Base(folder), Folder: folder, Mode: mode})
+		if err == nil {
 			a.log.Printf("project %s set to %s (your default for new projects)", filepath.Base(folder), mode)
+			continue
+		}
+		a.mu.Lock()
+		if a.projAlerts == nil {
+			a.projAlerts = map[string]string{}
+		}
+		first := a.projAlerts["default:"+key] != err.Error()
+		a.projAlerts["default:"+key] = err.Error()
+		a.mu.Unlock()
+		if first { // once, not at every sync
+			a.log.Printf("project %s (%s) wasn't set up automatically: %s", filepath.Base(folder), folder, err)
 		}
 	}
 }

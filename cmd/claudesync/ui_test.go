@@ -84,15 +84,21 @@ func TestScreens(t *testing.T) {
 	mkProj(fa, "sketch.ino", "desktop version")
 	mkProj(fa, "notes.txt", "x")
 	pmA.SetProject(projsync.Project{Key: "name:sketch", Name: "sketch", Folder: fa, Mode: projsync.ModeSync})
-	pmA.SetProject(projsync.Project{Key: "name:website", Name: "website", Folder: t.TempDir(), Mode: projsync.ModeBackup})
+	pmA.SetProject(projsync.Project{Key: "name:website", Name: "website", Folder: t.TempDir(), Mode: projsync.ModeBackup, Ignore: []string{"*.log", "build/"}})
+	// a folder that has gone missing (an unplugged drive, say)
+	pmA.SetProject(projsync.Project{Key: "name:notes", Name: "notes", Folder: filepath.Join(t.TempDir(), "gone"), Mode: projsync.ModeBackup})
 	a.eng.ProjectSync = pmA
 
 	_ = a.eng.Sync(t.Context()) // Claude "open": the remaining session waits; sketch asks how to link
 	a.log.Printf("ClaudeSync started")
 	a.log.Printf("restore: applied 3 item(s) from other PCs")
 
-	save := func(name string, c fyne.CanvasObject) {
-		fyne.DoAndWait(func() { a.win.SetContent(c) })
+	var save func(name string, c fyne.CanvasObject)
+	snap := func(name string) { save(name, nil) }
+	save = func(name string, c fyne.CanvasObject) {
+		if c != nil {
+			fyne.DoAndWait(func() { a.win.SetContent(c) })
+		}
 		time.Sleep(300 * time.Millisecond)
 		if out == "" {
 			return
@@ -114,14 +120,40 @@ func TestScreens(t *testing.T) {
 	}
 	proj, _ := a.projectsTab()
 	inner := proj.(*container.AppTabs)
-	for i, name := range []string{"folders", "needs", "server", "chats"} {
+	for i, name := range []string{"folders", "server", "chats"} {
 		fyne.DoAndWait(func() { inner.SelectIndex(i) })
 		time.Sleep(300 * time.Millisecond) // "On the server" loads in the background
 		save("projects-"+name, inner)
 	}
-	if d := pmA.Projects(); len(d) != 2 || d[0].Decision == nil && d[1].Decision == nil {
-		t.Fatalf("expected sketch to wait for a first-link decision: %+v", d)
+	var waiting, broken bool
+	for _, s := range pmA.Projects() {
+		waiting = waiting || s.Decision != nil
+		broken = broken || (s.Error != "" && s.Fix != "")
 	}
+	if !waiting || !broken {
+		t.Fatalf("expected one folder waiting for a decision and one explained problem: %+v", pmA.Projects())
+	}
+	// the dialogs on top of the Projects tab
+	tabs2 := a.mainUI().(*container.AppTabs)
+	fyne.DoAndWait(func() { tabs2.SelectIndex(1); a.win.SetContent(tabs2) })
+	fyne.DoAndWait(func() { a.projectDetails("name:notes") })
+	snap("dialog-details-problem")
+	fyne.DoAndWait(func() { a.win.Canvas().Overlays().Remove(a.win.Canvas().Overlays().Top()) })
+	fyne.DoAndWait(func() { a.projectDetails("name:sketch") })
+	snap("dialog-details-sketch")
+	fyne.DoAndWait(func() { a.win.Canvas().Overlays().Remove(a.win.Canvas().Overlays().Top()) })
+	add := filepath.Join(t.TempDir(), "arduino-clock")
+	mkProj(add, "clock.ino", "void setup(){}")
+	mkProj(add, ".env", "WIFI_PASSWORD=x")
+	os.MkdirAll(filepath.Join(add, "node_modules", "x"), 0o755)
+	mkProj(add, "node_modules/x/index.js", "x")
+	fi, err := projsync.Inspect(add, 200, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fyne.DoAndWait(func() { a.confirmAddFolder(add, fi) })
+	snap("dialog-add-folder")
+	fyne.DoAndWait(func() { a.win.Canvas().Overlays().Remove(a.win.Canvas().Overlays().Top()) })
 	fyne.DoAndWait(func() { a.win.Resize(fyne.NewSize(760, 1500)) })
 	save("settings-full", a.settingsTab())
 }
