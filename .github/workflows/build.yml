@@ -153,7 +153,16 @@ jobs:
           [ -n "${{ matrix.cc }}" ] && export CC="${{ matrix.cc }}"
           [ "${{ matrix.deps }}" = armhf ] && export PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig
           ldflags="-s -w"
-          [ "${{ matrix.goos }}" = windows ] && ldflags="$ldflags -H=windowsgui"
+          if [ "${{ matrix.goos }}" = windows ]; then
+            ldflags="$ldflags -H=windowsgui"
+            # Icon, manifest and version info: unsigned programs without them
+            # look far more suspicious to antivirus.
+            v=0.0.0; [ "${GITHUB_REF_TYPE}" = tag ] && v=${GITHUB_REF_NAME#v}
+            IFS=. read -r major minor patch <<< "${v%%-*}"
+            printf '#define VER_MAJOR %s\n#define VER_MINOR %s\n#define VER_PATCH %s\n#define VER_STR "%s"\n' \
+              "$major" "$minor" "$patch" "$v" > cmd/claudesync/winres/version.h
+            "${CC%-clang}-windres" -O coff -o "cmd/claudesync/rsrc_windows_${{ matrix.goarch }}.syso" cmd/claudesync/winres/claudesync.rc
+          fi
           mkdir -p dist
           go build -trimpath -ldflags "$ldflags" -o "dist/claudesync-${{ matrix.target }}${{ matrix.ext }}" ./cmd/claudesync
           file dist/*

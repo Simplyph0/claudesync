@@ -9,7 +9,17 @@ import (
 
 const runKey = `Software\Microsoft\Windows\CurrentVersion\Run`
 
+// Set turns start at login on or off for this program.
 func Set(enabled bool) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return SetExe(enabled, exe)
+}
+
+// SetExe turns start at login on or off for the program at exe.
+func SetExe(enabled bool, exe string) error {
 	k, _, err := registry.CreateKey(registry.CURRENT_USER, runKey, registry.SET_VALUE)
 	if err != nil {
 		return err
@@ -20,10 +30,6 @@ func Set(enabled bool) error {
 			return err
 		}
 		return nil
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
 	}
 	return k.SetStringValue("ClaudeSync", `"`+exe+`" --hidden`)
 }

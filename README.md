@@ -83,6 +83,13 @@ Server data lives in `/var/lib/claudesync` (Linux, as root) or
 4. On the **first** PC, choose a **sync passphrase**. On every other PC, enter the
    same passphrase.
 
+The first time you run a download, it installs itself to
+`%LOCALAPPDATA%\Programs\ClaudeSync` (Windows) or `~/.local/bin/claudesync`
+(Linux, with an app-menu entry) and runs from there. To **update**, just run
+the new download: it closes the running copy, replaces it and starts again, and
+start at login keeps pointing at the installed copy. The download itself can be
+deleted afterwards. `--no-install` runs a copy from where it is.
+
 The passphrase encrypts your chats before they leave the PC (Argon2id plus
 XChaCha20-Poly1305), so the server only ever stores ciphertext. **It can't be
 reset.** If it's lost, existing backups can't be decrypted.

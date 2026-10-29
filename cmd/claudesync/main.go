@@ -54,9 +54,13 @@ type App struct {
 func main() {
 	hidden := flag.Bool("hidden", false, "start in the tray without opening the window")
 	scan := flag.Bool("scan", false, "list what would be synced on this PC and exit")
+	noInstall := flag.Bool("no-install", false, "run from where it is instead of installing itself")
 	flag.Parse()
 	if *scan {
 		runScan()
+		return
+	}
+	if !*noInstall && handOffToInstalled() {
 		return
 	}
 	ln, err := net.Listen("tcp", instanceAddr)

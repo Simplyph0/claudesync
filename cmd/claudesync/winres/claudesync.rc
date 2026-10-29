@@ -1,0 +1,34 @@
+// Windows resources for the client: icon, manifest and version information.
+// Release builds rewrite version.h (see .github/workflows/build.yml). They
+// link with llvm-mingw, which adds no manifest of its own; MinGW GCC adds a
+// default one and warns about two, which is harmless for local builds.
+#include "version.h"
+
+1 ICON "icon.ico"
+1 24 "claudesync.manifest"
+
+1 VERSIONINFO
+FILEVERSION VER_MAJOR, VER_MINOR, VER_PATCH, 0
+PRODUCTVERSION VER_MAJOR, VER_MINOR, VER_PATCH, 0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "Simplyph0"
+      VALUE "FileDescription", "ClaudeSync - syncs Claude sessions between your PCs"
+      VALUE "FileVersion", VER_STR
+      VALUE "InternalName", "claudesync"
+      VALUE "LegalCopyright", "Open source: github.com/Simplyph0/claudesync"
+      VALUE "OriginalFilename", "claudesync.exe"
+      VALUE "ProductName", "ClaudeSync"
+      VALUE "ProductVersion", VER_STR
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 0x04B0
+  END
+END

@@ -9,8 +9,17 @@ import (
 	"path/filepath"
 )
 
-// Set writes or removes an XDG autostart entry.
+// Set writes or removes an XDG autostart entry for this program.
 func Set(enabled bool) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return SetExe(enabled, exe)
+}
+
+// SetExe writes or removes an XDG autostart entry for the program at exe.
+func SetExe(enabled bool, exe string) error {
 	cfg := os.Getenv("XDG_CONFIG_HOME")
 	if cfg == "" {
 		home, err := os.UserHomeDir()
@@ -25,10 +34,6 @@ func Set(enabled bool) error {
 			return err
 		}
 		return nil
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
