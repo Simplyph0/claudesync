@@ -278,3 +278,83 @@ func TestInspectFolder(t *testing.T) {
 		t.Error("inspecting a missing folder worked")
 	}
 }
+
+func setGitHead(p *pc, branch, commit string) {
+	os.MkdirAll(filepath.Join(p.folder, ".git", "refs", "heads"), 0o755)
+	os.WriteFile(filepath.Join(p.folder, ".git", "HEAD"), []byte("ref: refs/heads/"+branch+"\n"), 0o644)
+	os.WriteFile(filepath.Join(p.folder, ".git", "refs", "heads", branch), []byte(commit+"\n"), 0o644)
+}
+
+// "Not now" means not now: the same question isn't asked again at every sync,
+// only when what it's about changes or the user asks.
+func TestNotNowSticks(t *testing.T) {
+	w := newWorld(t)
+	a := w.pc("A", ModeSync)
+	setGitHead(a, "main", "aaa111")
+	a.write("src.c", "main", time.Hour)
+	a.sync()
+	b := w.pc("B", ModeSync)
+	setGitHead(b, "main", "bbb222")
+	b.sync()
+	if d := b.status().Decision; d == nil || d.Kind != "git" {
+		t.Fatalf("expected the git question: %+v", d)
+	}
+	if err := b.m.Decide(key, "no"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ { // scheduled syncs, or the app re-checking
+		b.sync()
+	}
+	st := b.status()
+	if st.Decision != nil || st.OnHold == "" || !strings.Contains(st.Status, "on hold") {
+		t.Fatalf("asked again, or not shown as on hold: %+v", st)
+	}
+	eq(t, "nothing synced", b.read("src.c"), "<missing>")
+
+	// A new commit on either PC is a different question.
+	setGitHead(b, "main", "ccc333")
+	b.sync()
+	if d := b.status().Decision; d == nil {
+		t.Fatal("a different situation wasn't asked about")
+	}
+	// Asking again on request.
+	b.m.Decide(key, "no")
+	b.sync()
+	if b.status().Decision != nil {
+		t.Fatal("snooze lost")
+	}
+	b.m.AskAgain(key)
+	b.sync()
+	if b.status().Decision == nil || b.status().OnHold != "" {
+		t.Fatalf("Ask me again didn't ask: %+v", b.status())
+	}
+}
+
+// "Sync anyway" is remembered for those two checkouts, not asked every time.
+func TestSyncAnywayIsRemembered(t *testing.T) {
+	w := newWorld(t)
+	a := w.pc("A", ModeSync)
+	setGitHead(a, "main", "aaa111")
+	a.write("src.c", "main", time.Hour)
+	a.sync()
+	b := w.pc("B", ModeSync)
+	setGitHead(b, "main", "bbb222")
+	b.sync()
+	b.m.Decide(key, "yes")
+	b.sync()
+	eq(t, "synced", b.read("src.c"), "main")
+	a.write("src.c", "main 2", time.Hour)
+	a.sync()
+	b.sync()
+	if b.status().Decision != nil {
+		t.Fatalf("asked again about the same two checkouts: %+v", b.status().Decision)
+	}
+	eq(t, "kept syncing", b.read("src.c"), "main 2")
+	setGitHead(a, "main", "ddd444") // A moves on
+	a.write("src.c", "main 3", time.Hour)
+	a.sync()
+	b.sync()
+	if b.status().Decision == nil {
+		t.Fatal("a new commit on the other PC wasn't asked about")
+	}
+}

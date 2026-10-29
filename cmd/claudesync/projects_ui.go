@@ -169,6 +169,8 @@ func stateOf(s projsync.Status) cardState {
 		return cardState{stIdle, "Paused", widget.LowImportance}
 	case s.Decision != nil || len(s.Clashes) > 0:
 		return cardState{stNeedsYou, "Needs you", widget.WarningImportance}
+	case s.OnHold != "":
+		return cardState{stProblem, "On hold", widget.WarningImportance}
 	case s.Active:
 		return cardState{stBusy, "Syncing…", widget.HighImportance}
 	case s.Error != "":
@@ -237,7 +239,11 @@ func (a *App) projectFoldersView() (fyne.CanvasObject, func() int) {
 		}
 		var chatOnly []string
 		for key, folder := range e.KnownProjects() {
-			if !configured[key] {
+			set := configured[key]
+			for _, s := range all { // the same folder under another key (a copy without .git) is still set up
+				set = set || samePathUI(s.Folder, folder)
+			}
+			if !set {
 				chatOnly = append(chatOnly, key+"\x00"+folder)
 			}
 		}
@@ -335,6 +341,15 @@ func (a *App) projectCard(s projsync.Status) fyne.CanvasObject {
 		if s.Decision != nil {
 			parts = append(parts, a.questionBox(s.Key, s.Decision, nil))
 		}
+		if s.OnHold != "" && s.Decision == nil {
+			again := widget.NewButton("Ask me again", func() {
+				if pm := a.projects(); pm != nil {
+					_ = pm.AskAgain(s.Key)
+				}
+				a.syncProject(s.Key)
+			})
+			parts = append(parts, importantLabel("⏸ On hold. You chose Not now, so nothing is synced here until something changes: "+s.OnHold, widget.WarningImportance), again)
+		}
 		for i := range s.Clashes {
 			parts = append(parts, a.questionBox(s.Key, nil, &s.Clashes[i]))
 		}
@@ -414,14 +429,16 @@ func (a *App) questionBox(key string, d *projsync.Decision, c *projsync.Clash) f
 				a.showProblem("Couldn't save your answer", err, "")
 				return
 			}
-			go func() {
-				_ = pm.Sync(a.ctx, key)
-				fyne.Do(func() {
-					if a.refreshUI != nil {
-						a.refreshUI()
-					}
-				})
-			}()
+			if choice != "no" { // Not now means stop: don't run the same check again
+				go func() {
+					_ = pm.Sync(a.ctx, key)
+					fyne.Do(func() {
+						if a.refreshUI != nil {
+							a.refreshUI()
+						}
+					})
+				}()
+			}
 			if a.refreshUI != nil {
 				a.refreshUI()
 			}

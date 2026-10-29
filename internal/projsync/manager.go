@@ -122,8 +122,11 @@ type pstate struct {
 	Status      string                `json:"status"`
 	Error       string                `json:"error,omitempty"`
 	Skipped     []Skip                `json:"skipped,omitempty"`
-	Fix         string                `json:"fix,omitempty"`    // what to do about Error
-	Detail      string                `json:"detail,omitempty"` // the raw error, for bug reports
+	Snoozed     map[string]string     `json:"snoozed,omitempty"`  // decision kind -> the question you said "Not now" to
+	Approved    map[string]string     `json:"approved,omitempty"` // decision kind -> the question you said yes to, for these exact facts
+	Hold        string                `json:"hold,omitempty"`     // the snoozed question that kept the last sync from running
+	Fix         string                `json:"fix,omitempty"`      // what to do about Error
+	Detail      string                `json:"detail,omitempty"`   // the raw error, for bug reports
 	Last        *Result               `json:"last,omitempty"`
 	Events      []Event               `json:"events,omitempty"`
 }
@@ -137,6 +140,7 @@ type Status struct {
 	Decision *Decision
 	Clashes  []Clash
 	Skipped  []Skip
+	OnHold   string  // a question you said "Not now" to, which is why nothing is syncing
 	Fix      string  // what to do about Error
 	Detail   string  // the raw error
 	Progress string  // what a running sync is doing
@@ -286,7 +290,7 @@ func (m *Manager) Projects() []Status {
 	for _, p := range m.projects {
 		st := m.stateLocked(p.Key)
 		s := Status{Project: *p, LastSync: st.LastSync, Status: st.Status, Error: st.Error, Decision: st.Decision, Skipped: st.Skipped,
-			Fix: st.Fix, Detail: st.Detail, Progress: m.progress[p.Key], Active: m.active[p.Key], Events: append([]Event(nil), st.Events...)}
+			OnHold: st.Hold, Fix: st.Fix, Detail: st.Detail, Progress: m.progress[p.Key], Active: m.active[p.Key], Events: append([]Event(nil), st.Events...)}
 		if st.Last != nil {
 			l := *st.Last
 			s.Last = &l
@@ -352,6 +356,7 @@ func (m *Manager) resetLocked(key string) {
 	st.Once = map[string]string{}
 	st.Clashes = map[string]*Clash{}
 	st.Resolved = map[string]string{}
+	st.Snoozed, st.Approved, st.Hold = nil, nil, ""
 }
 
 // Forget stops managing a project on this PC. Its files aren't touched.
@@ -376,15 +381,27 @@ func (m *Manager) Decide(key, choice string) error {
 	}
 	kind := st.Decision.Kind
 	if choice == "no" {
+		// Remember the exact question: it isn't asked again until something
+		// it depends on changes (a different commit, more files) or you ask.
+		if st.Snoozed == nil {
+			st.Snoozed = map[string]string{}
+		}
+		st.Snoozed[kind] = st.Decision.Message
+		st.Hold = st.Decision.Message
 		st.Decision = nil
-		st.Status = "paused: you said no; change the project's setting or sync again to be asked again"
-		if kind == "large" || kind == "first-link" || kind == "git" {
-			if p := m.projects[key]; p != nil && kind == "large" {
-				p.Mode = ModeOff
-				_ = m.saveProjectsLocked()
-			}
+		st.Status = "on hold: you chose Not now"
+		m.eventLocked(key, "info", "You chose Not now. Nothing is synced until something changes or you ask again.")
+		if p := m.projects[key]; p != nil && kind == "large" {
+			p.Mode = ModeOff
+			_ = m.saveProjectsLocked()
 		}
 		return m.saveStateLocked(key)
+	}
+	if kind == "git" && choice == "yes" {
+		if st.Approved == nil {
+			st.Approved = map[string]string{}
+		}
+		st.Approved[kind] = st.Decision.Message // for these two checkouts; a new commit asks again
 	}
 	switch kind {
 	case "large":
@@ -413,6 +430,18 @@ func (m *Manager) ResolveClash(key, p, choice string) error {
 	}
 	st.Resolved[p] = choice + "|" + c.LocalHash + "|" + c.RemoteHash
 	delete(st.Clashes, p)
+	return m.saveStateLocked(key)
+}
+
+// AskAgain forgets a "Not now" so the question is asked again at the next sync.
+func (m *Manager) AskAgain(key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.stateLocked(key)
+	st.Snoozed, st.Hold = nil, ""
+	if st.Status == "on hold: you chose Not now" {
+		st.Status = ""
+	}
 	return m.saveStateLocked(key)
 }
 
@@ -491,6 +520,9 @@ func (m *Manager) Sync(ctx context.Context, key string) error {
 	}
 	m.begin(key)
 	defer m.end(key)
+	m.mu.Lock()
+	m.stateLocked(key).Hold = ""
+	m.mu.Unlock()
 	var err error
 	if p.Mode == ModeBackup {
 		err = m.backup(ctx, p)
@@ -530,6 +562,12 @@ func (m *Manager) waitFor(key string, d *Decision) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := m.stateLocked(key)
+	if st.Snoozed[d.Kind] == d.Message {
+		st.Hold = d.Message
+		st.Status = "on hold: you chose Not now"
+		st.Error, st.Fix, st.Detail = "", "", ""
+		return m.saveStateLocked(key)
+	}
 	d.Created = m.Now()
 	st.Decision = d
 	st.Status = "waiting for your decision"
@@ -918,7 +956,12 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	// Git guard: don't mix files from two different checkouts.
 	if R != nil && R.Device != m.DeviceName && differentCheckout(R.Git, localGit) {
 		choice := m.Settings.GitGuard
-		if o := m.once(p.Key, "git"); o == "yes" {
+		gitMsg := fmt.Sprintf("%s has %s @ %s checked out; this PC has %s @ %s. Syncing now would mix files from the two. Pull/push or switch branch first, or sync anyway?",
+			R.Device, R.Git.Branch, R.Git.Head, localGit.Branch, localGit.Head)
+		m.mu.Lock()
+		approved := st.Approved["git"] == gitMsg
+		m.mu.Unlock()
+		if o := m.once(p.Key, "git"); o == "yes" || approved {
 			choice = GitSync
 		}
 		switch choice {
@@ -926,8 +969,7 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 			m.setStatus(p.Key, fmt.Sprintf("skipped: %s is on %s@%s, this PC on %s@%s", R.Device, R.Git.Branch, R.Git.Head, localGit.Branch, localGit.Head), nil)
 			return nil
 		case GitAsk:
-			return m.waitFor(p.Key, &Decision{Kind: "git", Message: fmt.Sprintf("%s has %s @ %s checked out; this PC has %s @ %s. Syncing now would mix files from the two. Pull/push or switch branch first, or sync anyway?",
-				R.Device, R.Git.Branch, R.Git.Head, localGit.Branch, localGit.Head)})
+			return m.waitFor(p.Key, &Decision{Kind: "git", Message: gitMsg})
 		}
 	}
 
