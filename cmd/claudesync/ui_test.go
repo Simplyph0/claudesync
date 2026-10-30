@@ -11,6 +11,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/widget"
 
 	"github.com/Simplyph0/claudesync/internal/appcfg"
 	"github.com/Simplyph0/claudesync/internal/claude"
@@ -133,6 +134,26 @@ func TestScreens(t *testing.T) {
 	if !waiting || !broken {
 		t.Fatalf("expected one folder waiting for a decision and one explained problem: %+v", pmA.Projects())
 	}
+	// Refreshing with nothing new must not replace the buttons (a click on a
+	// replaced button is lost); a real change must.
+	view, refreshView := a.projectFoldersView()
+	var b1, b2, b3 []*widget.Button
+	collectButtons(view, &b1)
+	fyne.DoAndWait(func() { refreshView() })
+	collectButtons(view, &b2)
+	if len(b1) == 0 || len(b1) != len(b2) || b1[0] != b2[0] {
+		t.Fatalf("an unchanged refresh rebuilt the cards (%d buttons before, %d after)", len(b1), len(b2))
+	}
+	p, _ := pmA.Get("name:website")
+	p.Paused = true
+	pmA.SetProject(p)
+	fyne.DoAndWait(func() { refreshView() })
+	collectButtons(view, &b3)
+	if len(b3) == 0 || b3[0] == b2[0] {
+		t.Fatal("a real change didn't update the cards")
+	}
+	p.Paused = false
+	pmA.SetProject(p)
 	// the dialogs on top of the Projects tab
 	tabs2 := a.mainUI().(*container.AppTabs)
 	fyne.DoAndWait(func() { tabs2.SelectIndex(1); a.win.SetContent(tabs2) })
@@ -156,4 +177,19 @@ func TestScreens(t *testing.T) {
 	fyne.DoAndWait(func() { a.win.Canvas().Overlays().Remove(a.win.Canvas().Overlays().Top()) })
 	fyne.DoAndWait(func() { a.win.Resize(fyne.NewSize(760, 1500)) })
 	save("settings-full", a.settingsTab())
+}
+
+func collectButtons(o fyne.CanvasObject, out *[]*widget.Button) {
+	switch v := o.(type) {
+	case *widget.Button:
+		*out = append(*out, v)
+	case *fyne.Container:
+		for _, c := range v.Objects {
+			collectButtons(c, out)
+		}
+	case *container.Scroll:
+		collectButtons(v.Content, out)
+	case *widget.Card:
+		collectButtons(v.Content, out)
+	}
 }

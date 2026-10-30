@@ -199,6 +199,8 @@ func (a *App) projectFoldersView() (fyne.CanvasObject, func() int) {
 	box := container.NewVBox()
 	summary := bold("")
 	var refresh func() int
+	var lastSig string
+	var lastNeeds int
 
 	add := widget.NewButtonWithIcon("Add folder…", theme.ContentAddIcon(), func() { a.pickFolderToAdd() })
 	add.Importance = widget.HighImportance
@@ -209,8 +211,9 @@ func (a *App) projectFoldersView() (fyne.CanvasObject, func() int) {
 	refresh = func() int {
 		pm := a.projects()
 		e := a.engine()
-		box.RemoveAll()
 		if pm == nil || e == nil {
+			box.RemoveAll()
+			lastSig = ""
 			summary.SetText("Not connected yet")
 			box.Refresh()
 			return 0
@@ -223,6 +226,28 @@ func (a *App) projectFoldersView() (fyne.CanvasObject, func() int) {
 			}
 			return strings.ToLower(all[i].Name) < strings.ToLower(all[j].Name)
 		})
+		// Rebuilding the cards replaces their buttons, and a click that lands
+		// on a button that is replaced between pressing and releasing is lost.
+		// So only rebuild when something shown has changed; progress text is
+		// updated in place.
+		var sig strings.Builder
+		for _, s := range all {
+			sig.WriteString(projectSig(s))
+		}
+		for key, folder := range e.KnownProjects() {
+			sig.WriteString(key + "=" + folder + ";")
+		}
+		if sig.String() == lastSig {
+			for _, s := range all {
+				if l := a.progressLbl[s.Key]; l != nil && s.Active {
+					l.SetText(s.Progress)
+				}
+			}
+			return lastNeeds
+		}
+		lastSig = sig.String()
+		a.progressLbl = map[string]*widget.Label{}
+		box.RemoveAll()
 		var needs, problems, busy int
 		configured := map[string]bool{}
 		for _, s := range all {
@@ -283,7 +308,8 @@ func (a *App) projectFoldersView() (fyne.CanvasObject, func() int) {
 			summary.SetText(strings.Join(parts, " · "))
 		}
 		box.Refresh()
-		return needs + problems
+		lastNeeds = needs + problems
+		return lastNeeds
 	}
 	refresh()
 
@@ -332,7 +358,11 @@ func (a *App) projectCard(s projsync.Status) fyne.CanvasObject {
 	case s.Paused:
 		parts = append(parts, subtle("Paused. Nothing is sent or received until you resume."))
 	case s.Active:
-		parts = append(parts, wrapLabel(s.Progress))
+		l := wrapLabel(s.Progress)
+		if a.progressLbl != nil {
+			a.progressLbl[s.Key] = l
+		}
+		parts = append(parts, l)
 	}
 	if s.Mode != projsync.ModeOff && !s.Paused {
 		if s.Error != "" && !s.Active {
@@ -378,6 +408,24 @@ func (a *App) projectCard(s projsync.Status) fyne.CanvasObject {
 	detail := widget.NewButtonWithIcon("Details", theme.SettingsIcon(), func() { a.projectDetails(s.Key) })
 	parts = append(parts, container.NewHBox(syncBtn, detail))
 	return widget.NewCard("", "", container.NewVBox(parts...))
+}
+
+// projectSig is everything a folder card shows, except live progress, so the
+// cards are only rebuilt when something on them changes.
+func projectSig(s projsync.Status) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s|%s|%s|%s|%t|%t|%s|%s|%s|%s|%s|%d|", s.Key, s.Name, s.Folder, s.Mode, s.Paused, s.Active, s.Status, s.Error, s.Fix, s.OnHold,
+		relTime(s.LastSync), len(s.Skipped))
+	if s.Decision != nil {
+		b.WriteString(s.Decision.Kind + s.Decision.Message)
+	}
+	for _, c := range s.Clashes {
+		b.WriteString("|" + c.Path + c.RemoteDevice)
+	}
+	if s.Last != nil {
+		fmt.Fprintf(&b, "|%d|%d|%s", s.Last.Files, s.Last.Bytes, s.Last.Summary())
+	}
+	return b.String() + ";"
 }
 
 // syncProject syncs one folder now.

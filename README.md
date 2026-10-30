@@ -86,7 +86,7 @@ Server data lives in `/var/lib/claudesync` (Linux, as root) or
 The first time you run a download, it installs itself to
 `%LOCALAPPDATA%\Programs\ClaudeSync` (Windows) or `~/.local/bin/claudesync`
 (Linux, with an app-menu entry) and runs from there. To **update**, just run
-the new download: it closes the running copy, replaces it and starts again, and
+the new download: it closes the running copy (including older versions that can't be asked to quit: it checks the program is ClaudeSync before stopping it), replaces it and starts again, and
 start at login keeps pointing at the installed copy. The download itself can be
 deleted afterwards. `--no-install` runs a copy from where it is.
 

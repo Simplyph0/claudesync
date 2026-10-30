@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/widget"
 
 	"github.com/Simplyph0/claudesync/internal/appcfg"
 	"github.com/Simplyph0/claudesync/internal/claude"
@@ -27,9 +29,15 @@ import (
 	"github.com/Simplyph0/claudesync/internal/syncer"
 )
 
-// Local port used only to keep a single copy running and to bring its
-// window forward when you open the app again.
-const instanceAddr = "127.0.0.1:47613"
+// Local port used only to keep a single copy running, to bring its window
+// forward when you open the app again, and to let a newer download ask it
+// to quit. CLAUDESYNC_INSTANCE_ADDR overrides it (for tests).
+var instanceAddr = func() string {
+	if a := os.Getenv("CLAUDESYNC_INSTANCE_ADDR"); a != "" {
+		return a
+	}
+	return "127.0.0.1:47613"
+}()
 
 type App struct {
 	fa  fyne.App
@@ -41,15 +49,16 @@ type App struct {
 	sec appcfg.Secrets
 	eng *syncer.Engine
 
-	ctx        context.Context
-	resched    chan struct{}
-	lastAsked  int
-	trayMenu   *fyne.Menu
-	refreshUI  func()
-	schedOnce  sync.Once
-	reopen     []claude.App      // Claude as it was when ClaudeSync asked it to quit
-	projAlerts map[string]string // what each project folder last told the user about
-	applying   bool
+	ctx         context.Context
+	resched     chan struct{}
+	lastAsked   int
+	trayMenu    *fyne.Menu
+	refreshUI   func()
+	schedOnce   sync.Once
+	reopen      []claude.App             // Claude as it was when ClaudeSync asked it to quit
+	progressLbl map[string]*widget.Label // live progress text on the folder cards, by project key
+	projAlerts  map[string]string        // what each project folder last told the user about
+	applying    bool
 }
 
 func main() {
@@ -117,9 +126,20 @@ func (a *App) listenInstance(ln net.Listener) {
 		}
 		line, _ := bufio.NewReader(c).ReadString('\n')
 		c.Close()
-		if line == "show\n" {
-			fyne.Do(a.showWindow)
-		}
+		handleInstanceCommand(line, func() { fyne.Do(a.showWindow) }, func() {
+			a.log.Printf("quitting so a newer version can take over")
+			fyne.Do(a.fa.Quit)
+		})
+	}
+}
+
+// handleInstanceCommand acts on a line sent to the running copy's port.
+func handleInstanceCommand(line string, show, quit func()) {
+	switch strings.TrimSpace(line) {
+	case "show":
+		show()
+	case "quit": // a newer version is installing itself
+		quit()
 	}
 }
 
