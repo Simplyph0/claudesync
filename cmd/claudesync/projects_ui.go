@@ -17,6 +17,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/Simplyph0/claudesync/internal/projsync"
+	"github.com/Simplyph0/claudesync/internal/proto"
 	"github.com/Simplyph0/claudesync/internal/syncer"
 )
 
@@ -824,10 +825,11 @@ func (a *App) projectDetails(key string) {
 
 func (a *App) onServerView() fyne.CanvasObject {
 	var items []projsync.RemoteProject
+	var loadAgain func()
 	info := wrapLabel("")
 	list := widget.NewList(func() int { return len(items) },
 		func() fyne.CanvasObject {
-			return container.NewBorder(nil, nil, nil, widget.NewButton("Download to…", nil), container.NewVBox(bold(""), subtle("")))
+			return container.NewBorder(nil, nil, nil, container.NewHBox(widget.NewButton("Download to…", nil), widget.NewButton("Delete…", nil)), container.NewVBox(bold(""), subtle("")))
 		},
 		func(i widget.ListItemID, o fyne.CanvasObject) {
 			r := items[i]
@@ -839,7 +841,11 @@ func (a *App) onServerView() fyne.CanvasObject {
 			labels := b.Objects[0].(*fyne.Container)
 			labels.Objects[0].(*widget.Label).SetText(strings.TrimSuffix(r.Title, " (backup from "+r.Device+")"))
 			labels.Objects[1].(*widget.Label).SetText(fmt.Sprintf("%s · version %d from %s · %s", kind, r.Version, r.Device, relTime(r.Time)))
-			b.Objects[1].(*widget.Button).OnTapped = func() { a.downloadProject(r) }
+			btns := b.Objects[1].(*fyne.Container)
+			btns.Objects[0].(*widget.Button).OnTapped = func() { a.downloadProject(r) }
+			btns.Objects[1].(*widget.Button).OnTapped = func() {
+				a.confirmDelete(strings.TrimSuffix(r.Title, " (backup from "+r.Device+")"), proto.KindProject, r.ID, func() { loadAgain() })
+			}
 		})
 	load := func() {
 		pm := a.projects()
@@ -870,6 +876,7 @@ func (a *App) onServerView() fyne.CanvasObject {
 			})
 		}()
 	}
+	loadAgain = load
 	load()
 	return container.NewPadded(container.NewBorder(container.NewVBox(info, widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), load)), nil, nil, nil, list))
 }

@@ -817,6 +817,9 @@ func (m *Manager) remote(ctx context.Context, id string) (*Manifest, proto.ItemH
 	if err != nil {
 		return nil, h, err
 	}
+	if h.Purged { // deleted from the server for good: only the marker is left
+		return nil, h, nil
+	}
 	man, err := openManifest(m.Keys, proto.KindProject, id, blob)
 	return man, h, err
 }

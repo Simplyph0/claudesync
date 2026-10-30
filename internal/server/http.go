@@ -265,7 +265,7 @@ func (s *Server) check(w http.ResponseWriter, err error) bool {
 		return true
 	case errors.Is(err, ErrMissingChunks):
 		writeErr(w, http.StatusUnprocessableEntity, err.Error())
-	case errors.Is(err, ErrRemoved):
+	case errors.Is(err, ErrRemoved), errors.Is(err, ErrPurged):
 		writeErr(w, http.StatusGone, err.Error())
 	case errors.Is(err, ErrConflict):
 		writeErr(w, http.StatusConflict, err.Error())
@@ -366,6 +366,15 @@ func metaHeader(r *http.Request) []byte {
 
 // removeItem strikes an item from the backup; every PC stops syncing it.
 func (s *Server) removeItem(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("forever") == "1" {
+		h, err := s.store.Purge(r.PathValue("kind"), r.PathValue("id"))
+		if !s.check(w, err) {
+			return
+		}
+		s.Logf("device %q deleted %s from the server for good", deviceFrom(r).Name, h.Key())
+		writeJSON200(w, h)
+		return
+	}
 	h, err := s.store.SetRemoved(r.PathValue("kind"), r.PathValue("id"), true)
 	if !s.check(w, err) {
 		return

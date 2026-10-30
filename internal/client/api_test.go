@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -66,5 +67,41 @@ func TestPinningAndFallback(t *testing.T) {
 	}
 	if _, err := c.Devices(ctx); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("revoked device still accepted: %v", err)
+	}
+}
+
+// An old server ignores "forever" and only removes; saying "deleted" would be a lie.
+func TestPurgeNeedsANewServer(t *testing.T) {
+	st, err := server.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetPassword("password123")
+	ts := httptest.NewServer(server.New(st).Handler())
+	defer ts.Close()
+	ctx := context.Background()
+	c := New("", ts.URL, "", "")
+	resp, err := c.Login(ctx, "password123", "pc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Token = resp.Token
+	if _, err := c.Put(ctx, "session", "local_x", 0, []byte("v1"), nil); err != nil {
+		t.Fatal(err)
+	}
+	h, err := c.Purge(ctx, "session", "local_x")
+	if err != nil || !h.Purged {
+		t.Fatalf("purge on a current server: %+v %v", h, err)
+	}
+
+	// the same call against a server that doesn't know "forever"
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"kind":"session","id":"local_x","version":1,"removed":true}`))
+	}))
+	defer old.Close()
+	_, err = New("", old.URL, "", "tok").Purge(ctx, "session", "local_x")
+	if !errors.Is(err, ErrServerTooOld) {
+		t.Fatalf("an old server's answer was taken as success: %v", err)
 	}
 }

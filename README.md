@@ -120,6 +120,11 @@ After setup ClaudeSync lives in the tray:
 - **Remove from the backup:** in the **History** tab, **Remove from server backup** stops
   an item syncing to every PC without deleting it from any PC's Claude. It can be
   brought back for 30 days ("Show removed"), then the server deletes it.
+- **Delete for good:** **Delete from server for good…** (History tab, and Projects → On the server)
+  erases every saved version straight away. It can't be undone, and nothing is deleted from any PC.
+  A tiny marker stays on the server so that no PC uploads the item again. Disk space is freed within
+  a day. **Delete all removed for good…** does this for everything you've removed. Needs the server
+  updated to the same version (an older server says so and only removes the item).
 - **Skip on one PC:** **Skip** next to an item waiting to restore keeps it off that PC
   only. **Skipped on this PC…** lists skipped items so you can un-skip them.
 - **Password changes:** the **Server** tab can change the server password. Connected

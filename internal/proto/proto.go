@@ -7,7 +7,7 @@ import (
 )
 
 // Version is the protocol/app version reported by both programs.
-const Version = "0.5.2"
+const Version = "0.6.0"
 
 // Item kinds.
 const (
@@ -67,6 +67,9 @@ type ItemHeader struct {
 	// and are deleted for good after RemovedHoldDays.
 	Removed   bool      `json:"removed,omitempty"`
 	RemovedAt time.Time `json:"removedAt,omitzero"`
+	// Purged items were deleted for good: only a small marker is left, so no
+	// PC uploads them again. They can't be brought back.
+	Purged bool `json:"purged,omitempty"`
 }
 
 // RemovedHoldDays is how long a removed item can still be brought back.

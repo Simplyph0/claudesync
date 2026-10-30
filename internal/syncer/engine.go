@@ -855,6 +855,23 @@ func (e *Engine) RemoveFromServer(ctx context.Context, kind, id string) error {
 	return err
 }
 
+// DeleteFromServer erases an item from the server for good: every stored
+// version is deleted, and no PC will upload it again. No PC's own copy is
+// touched. Unlike RemoveFromServer this can't be undone.
+func (e *Engine) DeleteFromServer(ctx context.Context, kind, id string) error {
+	if _, err := e.API.Purge(ctx, kind, id); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.st.Removed[kind+"/"+id] = true
+	delete(e.st.Pending, kind+"/"+id)
+	err := e.saveLocked()
+	e.mu.Unlock()
+	e.logf("deleted %s/%s from the server for good", kind, id)
+	e.changed()
+	return err
+}
+
 // BringBack undoes RemoveFromServer.
 func (e *Engine) BringBack(ctx context.Context, kind, id string) error {
 	if _, err := e.API.BringBack(ctx, kind, id); err != nil {

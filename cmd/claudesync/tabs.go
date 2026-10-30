@@ -322,7 +322,9 @@ func (a *App) historyTab() fyne.CanvasObject {
 		func(i widget.ListItemID, o fyne.CanvasObject) {
 			it := items[i]
 			label := "[" + it.Header.Kind + "] " + it.Title
-			if it.Header.Removed {
+			if it.Header.Purged {
+				label += "  ·  deleted for good"
+			} else if it.Header.Removed {
 				days := proto.RemovedHoldDays - int(time.Since(it.Header.RemovedAt).Hours()/24)
 				label += fmt.Sprintf("  ·  removed (deleted for good in %d days)", max(days, 0))
 			} else if it.Skipped {
@@ -334,7 +336,11 @@ func (a *App) historyTab() fyne.CanvasObject {
 	removeBtn := widget.NewButton("Remove from server backup", nil)
 	removeBtn.Importance = widget.DangerImportance
 	backBtn := widget.NewButton("Bring back", nil)
+	deleteBtn := widget.NewButton("Delete from server for good…", nil)
+	deleteBtn.Importance = widget.DangerImportance
+	purgeAll := widget.NewButton("Delete all removed for good…", nil)
 	removeBtn.Disable()
+	deleteBtn.Disable()
 	backBtn.Hide()
 
 	filter := func() {
@@ -348,6 +354,8 @@ func (a *App) historyTab() fyne.CanvasObject {
 		current, versions = nil, nil
 		removeBtn.Disable()
 		removeBtn.Show()
+		deleteBtn.Disable()
+		deleteBtn.Show()
 		backBtn.Hide()
 		verList.Refresh()
 		itemList.Refresh()
@@ -375,14 +383,24 @@ func (a *App) historyTab() fyne.CanvasObject {
 	itemList.OnSelected = func(i widget.ListItemID) {
 		it := items[i]
 		current = &it
-		if it.Header.Removed {
+		switch {
+		case it.Header.Purged: // nothing left to restore, remove or delete
+			removeBtn.Hide()
+			backBtn.Hide()
+			deleteBtn.Hide()
+			versions = nil
+			verList.Refresh()
+			return
+		case it.Header.Removed:
 			removeBtn.Hide()
 			backBtn.Show()
-		} else {
+		default:
 			backBtn.Hide()
 			removeBtn.Show()
 			removeBtn.Enable()
 		}
+		deleteBtn.Show()
+		deleteBtn.Enable()
 		go func() {
 			vs, err := a.engine().API.Versions(context.Background(), it.Header.Kind, it.Header.ID)
 			fyne.Do(func() {
@@ -419,6 +437,50 @@ func (a *App) historyTab() fyne.CanvasObject {
 			}()
 		}, a.win)
 	}
+	deleteBtn.OnTapped = func() {
+		if current == nil {
+			return
+		}
+		it := *current
+		a.confirmDelete(it.Title, it.Header.Kind, it.Header.ID, reload)
+	}
+	purgeAll.OnTapped = func() {
+		var gone []syncer.ServerItem
+		for _, it := range all {
+			if it.Header.Removed && !it.Header.Purged {
+				gone = append(gone, it)
+			}
+		}
+		if len(gone) == 0 {
+			dialog.ShowInformation("Nothing to delete", "No removed items are waiting. Tick \"Show removed\" to see them.", a.win)
+			return
+		}
+		d := dialog.NewConfirm("Delete all removed items for good?", fmt.Sprintf("Delete the %d removed item(s) from the server for good?\n\n"+
+			"• Every saved version is erased. This can't be undone.\n"+
+			"• Nothing is deleted from any PC.\n"+
+			"• No PC will back them up again.", len(gone)), func(ok bool) {
+			if !ok {
+				return
+			}
+			go func() {
+				var errs []error
+				for _, it := range gone {
+					if err := a.engine().DeleteFromServer(context.Background(), it.Header.Kind, it.Header.ID); err != nil {
+						errs = append(errs, fmt.Errorf("%s: %w", it.Title, err))
+					}
+				}
+				fyne.Do(func() {
+					if err := errors.Join(errs...); err != nil {
+						a.showProblem("Some items couldn't be deleted", err, "")
+					}
+					reload()
+				})
+			}()
+		}, a.win)
+		d.SetConfirmText("Delete for good")
+		d.SetConfirmImportance(widget.DangerImportance)
+		d.Show()
+	}
 	backBtn.OnTapped = func() {
 		if current == nil {
 			return
@@ -439,11 +501,46 @@ func (a *App) historyTab() fyne.CanvasObject {
 
 	refresh := widget.NewButton("Refresh", reload)
 	reload()
-	left := container.NewBorder(nil, container.NewHBox(removeBtn, backBtn), nil, nil, itemList)
+	left := container.NewBorder(nil, container.NewHBox(removeBtn, backBtn, deleteBtn), nil, nil, itemList)
 	split := container.NewHSplit(left, verList)
 	split.Offset = 0.5
 	help := wrapLabel("Everything in the server backup. Pick an item to see its saved versions. Restoring an old version puts it on this PC; it becomes the newest everywhere at the next backup.")
-	return container.NewPadded(container.NewBorder(container.NewVBox(help, container.NewHBox(refresh, showRemoved)), nil, nil, nil, split))
+	return container.NewPadded(container.NewBorder(container.NewVBox(help, container.NewHBox(refresh, showRemoved, purgeAll)), nil, nil, nil, split))
+}
+
+// confirmDelete asks, in plain words, before erasing an item from the server
+// for good, then does it and calls done.
+func (a *App) confirmDelete(title, kind, id string, done func()) {
+	msg := fmt.Sprintf("Delete %q from the server for good?\n\n"+
+		"• Every saved version is erased from the server. This can't be undone.\n"+
+		"• It is NOT deleted from any PC. Your own copies stay.\n"+
+		"• No PC will back it up again; a tiny marker stays so it can't come back.\n"+
+		"• The server frees the space within a day.", title)
+	if pm := a.projects(); kind == proto.KindProject && pm != nil {
+		if folder := pm.FolderForItem(id); folder != "" {
+			msg += fmt.Sprintf("\n\nThis PC's folder %s keeps its files, but stops being synced or backed up.", folder)
+		}
+	}
+	d := dialog.NewConfirm("Delete from the server for good?", msg, func(ok bool) {
+		if !ok {
+			return
+		}
+		go func() {
+			err := a.engine().DeleteFromServer(context.Background(), kind, id)
+			fyne.Do(func() {
+				if err != nil {
+					a.showProblem("Couldn't delete it", err, "")
+				}
+				done()
+				if a.refreshUI != nil {
+					a.refreshUI()
+				}
+			})
+		}()
+	}, a.win)
+	d.SetConfirmText("Delete for good")
+	d.SetConfirmImportance(widget.DangerImportance)
+	d.Show()
 }
 
 func (a *App) confirmRollback(v proto.ItemHeader) {

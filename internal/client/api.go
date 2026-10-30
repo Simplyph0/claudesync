@@ -30,6 +30,7 @@ var (
 	ErrUnauthorized = errors.New("unauthorized")
 	ErrPinMismatch  = errors.New("server certificate does not match the fingerprint you confirmed")
 	ErrRemoved      = errors.New("removed from the server backup")
+	ErrServerTooOld = errors.New("the server is too old to delete for good; it only removed the item")
 )
 
 // APIError is an error message returned by the server.
@@ -340,6 +341,19 @@ func decodeHeader(resp *http.Response, err error) (proto.ItemHeader, error) {
 func (c *Client) Remove(ctx context.Context, kind, id string) (proto.ItemHeader, error) {
 	var h proto.ItemHeader
 	return h, c.call(ctx, "DELETE", "/api/items/"+kind+"/"+id, nil, &h)
+}
+
+// Purge deletes an item from the server for good (every version). Nothing on
+// any PC is touched, and the item can't be brought back or uploaded again.
+func (c *Client) Purge(ctx context.Context, kind, id string) (proto.ItemHeader, error) {
+	var h proto.ItemHeader
+	if err := c.call(ctx, "DELETE", "/api/items/"+kind+"/"+id+"?forever=1", nil, &h); err != nil {
+		return h, err
+	}
+	if !h.Purged { // a server from before deleting for good ignores "forever" and only removes
+		return h, ErrServerTooOld
+	}
+	return h, nil
 }
 
 // BringBack undoes Remove.

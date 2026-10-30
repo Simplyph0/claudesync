@@ -30,6 +30,7 @@ var (
 	ErrBadPassword  = errors.New("wrong password")
 	ErrNotInitDone  = errors.New("server has no password yet; run 'claudesync-server init'")
 	ErrRemoved      = errors.New("this item was removed from the server backup")
+	ErrPurged       = errors.New("this item was deleted from the server for good")
 	ErrInvalidInput = errors.New("invalid input")
 )
 
@@ -53,6 +54,7 @@ type itemMeta struct {
 	Versions  []proto.ItemHeader `json:"versions"` // oldest first
 	Removed   bool               `json:"removed,omitempty"`
 	RemovedAt time.Time          `json:"removedAt,omitzero"`
+	Purged    bool               `json:"purged,omitempty"` // content erased; only the marker is left
 }
 
 // latest is the newest version's header, carrying the removed state.
@@ -61,7 +63,7 @@ func (m *itemMeta) latest() (proto.ItemHeader, bool) {
 		return proto.ItemHeader{}, false
 	}
 	h := m.Versions[len(m.Versions)-1]
-	h.Removed, h.RemovedAt = m.Removed, m.RemovedAt
+	h.Removed, h.RemovedAt, h.Purged = m.Removed, m.RemovedAt, m.Purged
 	return h, true
 }
 
@@ -385,6 +387,9 @@ func (s *Store) SetRemoved(kind, id string, removed bool) (proto.ItemHeader, err
 	if m == nil || len(m.Versions) == 0 {
 		return proto.ItemHeader{}, ErrNotFound
 	}
+	if m.Purged && !removed {
+		return proto.ItemHeader{}, ErrPurged
+	}
 	if m.Removed != removed {
 		m.Removed = removed
 		m.RemovedAt = time.Time{}
@@ -399,13 +404,47 @@ func (s *Store) SetRemoved(kind, id string, removed bool) (proto.ItemHeader, err
 	return h, s.saveIndexLocked()
 }
 
-// PurgeRemoved deletes items removed longer than the hold period ago.
+// Purge erases an item's stored copies for good, every version. A small
+// marker stays (marked removed), so no PC uploads the item again and the
+// others learn it is gone. The chunks only this item used are freed by the
+// next GCChunks passes. This can't be undone.
+func (s *Store) Purge(kind, id string) (proto.ItemHeader, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.idx.Items[kind+"/"+id]
+	if m == nil || len(m.Versions) == 0 {
+		return proto.ItemHeader{}, ErrNotFound
+	}
+	last := m.Versions[len(m.Versions)-1]
+	for _, v := range m.Versions {
+		_ = os.Remove(s.blobPath(kind, id, v.Version))
+		_ = os.Remove(s.refsPath(kind, id, v.Version))
+	}
+	if err := os.MkdirAll(filepath.Dir(s.blobPath(kind, id, last.Version)), 0o700); err != nil {
+		return proto.ItemHeader{}, err
+	}
+	if err := writeFileAtomic(s.blobPath(kind, id, last.Version), nil); err != nil { // so reading the marker still works
+		return proto.ItemHeader{}, err
+	}
+	s.idx.Seq++ // every PC sees the change
+	last.Seq, last.Size, last.Meta = s.idx.Seq, 0, nil
+	m.Versions = []proto.ItemHeader{last}
+	if !m.Removed {
+		m.Removed, m.RemovedAt = true, time.Now().UTC()
+	}
+	m.Purged = true
+	h, _ := m.latest()
+	return h, s.saveIndexLocked()
+}
+
+// PurgeRemoved deletes items removed longer than the hold period ago (never
+// the markers of items deleted for good).
 func (s *Store) PurgeRemoved(now time.Time) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
 	for key, m := range s.idx.Items {
-		if m.Removed && now.Sub(m.RemovedAt) > proto.RemovedHoldDays*24*time.Hour {
+		if m.Removed && !m.Purged && now.Sub(m.RemovedAt) > proto.RemovedHoldDays*24*time.Hour {
 			_ = os.RemoveAll(filepath.Join(s.dir, "items", m.Kind, m.ID))
 			delete(s.idx.Items, key)
 			n++
@@ -439,7 +478,7 @@ func (s *Store) Get(kind, id string, v int) (proto.ItemHeader, []byte, error) {
 				h, found = x, true
 			}
 		}
-		h.Removed, h.RemovedAt = m.Removed, m.RemovedAt
+		h.Removed, h.RemovedAt, h.Purged = m.Removed, m.RemovedAt, m.Purged
 	}
 	s.mu.Unlock()
 	if !found {

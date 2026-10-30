@@ -125,3 +125,52 @@ func TestProjectItemsIgnoredByChatSync(t *testing.T) {
 		t.Fatalf("project item queued as a chat restore: %+v", p)
 	}
 }
+
+// Deleting for good removes the server's copy and nothing ever brings it back,
+// not even from a PC that still has the chat and hadn't heard about it.
+func TestDeleteFromServerForGood(t *testing.T) {
+	w := newWorld(t)
+	desk := w.pc("Desktop", "code")
+	desk.addSession("local_aaaa", cliA, "Keep")
+	desk.addSession("local_bbbb", cliB, "Delete me")
+	desk.sync()
+	lap := w.pc("Laptop", "code")
+	lap.appOpen = true // the laptop has it waiting, hasn't loaded it
+	lap.sync()
+
+	if err := desk.eng.DeleteFromServer(context.Background(), proto.KindSession, "local_bbbb"); err != nil {
+		t.Fatal(err)
+	}
+	it := serverItem(t, desk.eng, "local_bbbb")
+	if it == nil || !it.Header.Purged || !it.Header.Removed {
+		t.Fatalf("server list: %+v", it)
+	}
+	if _, blob, err := desk.eng.API.Get(context.Background(), proto.KindSession, "local_bbbb", 0); err != nil || len(blob) != 0 {
+		t.Fatalf("the content is still on the server: %d bytes, %v", len(blob), err)
+	}
+	if err := lap.eng.BringBack(context.Background(), proto.KindSession, "local_bbbb"); err == nil {
+		t.Fatal("brought back something deleted for good")
+	}
+
+	// The desktop still has the chat, keeps working on it, and it never returns to the server.
+	desk.appendLine(cliB, "more work")
+	desk.sync()
+	if it := serverItem(t, desk.eng, "local_bbbb"); it == nil || !it.Header.Purged || it.Header.Version != 1 {
+		t.Fatalf("uploaded again: %+v", it)
+	}
+	if s := desk.sessions(); len(s) != 2 {
+		t.Fatalf("deleting from the server touched the desktop's own copy: %v", s)
+	}
+	// A PC that never heard about it doesn't get it either, and one that has it doesn't re-upload it.
+	lap.appOpen = false
+	lap.sync()
+	if s := lap.sessions(); len(s) != 1 || s[0] != "Keep" {
+		t.Fatalf("laptop restored a deleted chat: %v", s)
+	}
+	third := w.pc("Third", "code")
+	third.addSession("local_bbbb", cliB, "Delete me")
+	third.sync()
+	if it := serverItem(t, desk.eng, "local_bbbb"); it == nil || it.Header.Version != 1 {
+		t.Fatalf("a PC that hadn't heard of the deletion put it back: %+v", it)
+	}
+}

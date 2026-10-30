@@ -358,3 +358,37 @@ func TestSyncAnywayIsRemembered(t *testing.T) {
 		t.Fatal("a new commit on the other PC wasn't asked about")
 	}
 }
+
+// A project whose server copy was deleted for good doesn't sync or back up
+// again, says why in words, and never touches the files on this PC.
+func TestDeletedProjectOnServer(t *testing.T) {
+	for _, mode := range []string{ModeSync, ModeBackup} {
+		t.Run(mode, func(t *testing.T) {
+			w := newWorld(t)
+			a := w.pc("A", mode)
+			a.write("a.txt", "1", time.Hour)
+			a.sync()
+			rp, _ := a.m.RemoteProjects(context.Background())
+			if len(rp) != 1 {
+				t.Fatalf("server projects: %+v", rp)
+			}
+			if _, err := a.m.API.Purge(context.Background(), "project", rp[0].ID); err != nil {
+				t.Fatal(err)
+			}
+			a.write("a.txt", "2", time.Hour)
+			err := a.syncErr()
+			st := a.status()
+			if mode == ModeBackup {
+				if err == nil || !strings.Contains(st.Error, "removed or deleted") || st.Fix == "" {
+					t.Fatalf("not explained: %v %+v", err, st)
+				}
+			} else if err != nil || !strings.Contains(st.Status, "removed from the server") {
+				t.Fatalf("sync of a deleted project: %v %+v", err, st)
+			}
+			eq(t, "files untouched", a.read("a.txt"), "2")
+			if rp, _ := a.m.RemoteProjects(context.Background()); len(rp) != 1 || !rp[0].Removed || rp[0].Version != 1 {
+				t.Fatalf("something was uploaded again: %+v", rp)
+			}
+		})
+	}
+}
