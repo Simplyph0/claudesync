@@ -49,6 +49,8 @@ type ScanResult struct {
 	Corrupt       []string        // desktop records that aren't valid JSON
 	Deleted       map[string]bool // desktop session ids the app marked deleted
 	ProjectDirs   []string        // project folders used by local sessions
+	ChatDirs      []string        // every folder a chat on this PC uses (also Code chats when those are synced)
+	SessionsOK    bool            // the sessions folder was there to read, so an empty ChatDirs means no chats
 }
 
 type Scanner struct {
@@ -120,6 +122,11 @@ func (s *Scanner) transcriptIndex() map[string]string {
 // Scan finds every syncable item on this PC.
 func (s *Scanner) Scan() (*ScanResult, error) {
 	res := &ScanResult{Items: map[string]*Local{}, Deleted: map[string]bool{}}
+	if dir := s.Loc.SessionsDir(); s.Opt.Sessions && dir != "" {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			res.SessionsOK = true
+		}
+	}
 	tidx := s.transcriptIndex()
 	usedCli := map[string]bool{}
 	projectOfDir := map[string]string{} // projects/<enc> folder -> project root
@@ -150,6 +157,7 @@ func (s *Scanner) Scan() (*ScanResult, error) {
 			}
 			if claude.ScratchRel(r.cwd) == "" {
 				res.ProjectDirs = append(res.ProjectDirs, proj)
+				res.ChatDirs = append(res.ChatDirs, proj)
 				projectOfDir[tdir] = proj
 			}
 			l := s.sessionLocal(r, r.cliID, tdir, r.cwd)
@@ -167,6 +175,7 @@ func (s *Scanner) Scan() (*ScanResult, error) {
 			}
 			if claude.ScratchRel(cwd) == "" {
 				projectOfDir[tdir] = cwd
+				res.ChatDirs = append(res.ChatDirs, cwd)
 			}
 			r := &desktopRecord{cliID: cli, cwd: cwd, title: title}
 			l := s.sessionLocal(r, cli, tdir, cwd)

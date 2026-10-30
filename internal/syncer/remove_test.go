@@ -2,6 +2,8 @@ package syncer
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Simplyph0/claudesync/internal/proto"
@@ -172,5 +174,45 @@ func TestDeleteFromServerForGood(t *testing.T) {
 	third.sync()
 	if it := serverItem(t, desk.eng, "local_bbbb"); it == nil || it.Header.Version != 1 {
 		t.Fatalf("a PC that hadn't heard of the deletion put it back: %+v", it)
+	}
+}
+
+// The engine reports which folders chats use, and only says so when it really
+// read the sessions: "no chats" is only believed from a good look.
+func TestChatFolders(t *testing.T) {
+	w := newWorld(t)
+	desk := w.pc("Desktop", "code")
+	if _, ok := desk.eng.ChatFolders(); ok {
+		t.Fatal("trusted before any sync ran")
+	}
+	desk.addSession("local_aaaa", cliA, "One")
+	desk.addSession("local_bbbb", cliB, "Two")
+	desk.sync()
+	dirs, ok := desk.eng.ChatFolders()
+	if !ok || len(dirs) == 0 {
+		t.Fatalf("after a sync with chats: %v %v", dirs, ok)
+	}
+	for _, d := range dirs {
+		if d != desk.project {
+			t.Fatalf("unexpected folder %q (want %q)", d, desk.project)
+		}
+	}
+
+	// every chat deleted in Claude: still a good look, and it's empty
+	files, _ := filepath.Glob(filepath.Join(desk.sessionsDir(), "local_*.json"))
+	for _, f := range files {
+		os.Remove(f)
+	}
+	desk.sync()
+	dirs, ok = desk.eng.ChatFolders()
+	if !ok || len(dirs) != 0 {
+		t.Fatalf("after deleting every chat: %v %v", dirs, ok)
+	}
+
+	// Claude's sessions folder not there at all: nothing can be concluded
+	os.RemoveAll(filepath.Dir(filepath.Dir(desk.sessionsDir()))) // claude-code-sessions itself
+	desk.sync()
+	if _, ok := desk.eng.ChatFolders(); ok {
+		t.Fatal("trusted an empty list when the sessions folder is missing")
 	}
 }

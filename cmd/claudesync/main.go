@@ -330,6 +330,7 @@ func (a *App) doSync(manual bool) {
 	a.addDefaultProjects()
 	err := e.Sync(a.ctx)
 	a.afterRun("sync", err)
+	a.reconcileChats()
 	a.notifyProjects()
 	n := e.WaitingForApp()
 	a.mu.Lock()
@@ -338,6 +339,29 @@ func (a *App) doSync(manual bool) {
 	a.mu.Unlock()
 	if ask {
 		fyne.Do(func() { a.askRestart(n) })
+	}
+}
+
+// reconcileChats notes which project folders have chats, and removes a folder
+// from My Folders once its last chat was deleted (if you haven't turned that
+// off). Only this PC's list changes: files and the server copy are untouched.
+func (a *App) reconcileChats() {
+	e, pm := a.engine(), a.projects()
+	if e == nil || pm == nil {
+		return
+	}
+	dirs, ok := e.ChatFolders()
+	gone := pm.ReconcileChats(dirs, ok, a.settings().ForgetChatless, 5*time.Minute)
+	for _, p := range gone {
+		a.log.Printf("project %s removed from My Folders: its last chat was deleted. Its files (%s) and the copy on the server are untouched.", p.Name, p.Folder)
+		a.notify("ClaudeSync", fmt.Sprintf("%s was removed from My Folders because its last chat was deleted. Your files and the server copy are untouched.", p.Name))
+	}
+	if len(gone) > 0 {
+		fyne.Do(func() {
+			if a.refreshUI != nil {
+				a.refreshUI()
+			}
+		})
 	}
 }
 
@@ -560,7 +584,7 @@ func (a *App) addDefaultProjects() {
 		if mode == projsync.ModeSync && projsync.HasGitRemote(folder) && c.ProjectGitDefault != projsync.ModeSync {
 			mode = c.ProjectGitDefault
 		}
-		err := e.ProjectSync.SetProject(projsync.Project{Key: key, Name: filepath.Base(folder), Folder: folder, Mode: mode})
+		err := e.ProjectSync.SetProject(projsync.Project{Key: key, Name: filepath.Base(folder), Folder: folder, Mode: mode, ChatSeen: true})
 		if err == nil {
 			a.log.Printf("project %s set to %s (your default for new projects)", filepath.Base(folder), mode)
 			continue

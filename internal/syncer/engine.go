@@ -114,6 +114,8 @@ type Engine struct {
 	status       Status
 	repairedUpTo time.Time
 	projectDirs  []string // project folders local sessions use (from the last scan)
+	chatDirs     []string // every folder chats use (from the last scan)
+	chatsOK      bool     // chatDirs is from a scan in the current sync
 }
 
 func (e *Engine) Init() error {
@@ -359,6 +361,9 @@ func (e *Engine) repair() {
 }
 
 func (e *Engine) sync(ctx context.Context) error {
+	e.mu.Lock()
+	e.chatsOK = false // only a scan in this run may say which folders have chats
+	e.mu.Unlock()
 	e.repair()
 	berr := e.backup(ctx)
 	if berr != nil {
@@ -384,6 +389,7 @@ func (e *Engine) sync(ctx context.Context) error {
 	}
 	e.mu.Lock()
 	e.projectDirs = scan.ProjectDirs
+	e.chatDirs, e.chatsOK = scan.ChatDirs, scan.SessionsOK
 	e.mu.Unlock()
 
 	// Work out what this PC is missing or behind on.
@@ -902,6 +908,16 @@ func (e *Engine) Skip(key, title string) error {
 	e.logf("skipping %q on this PC", title)
 	e.changed()
 	return err
+}
+
+// ChatFolders lists every folder a chat on this PC uses, from the sync that
+// just ran. ok is false when that sync didn't get as far as reading the
+// sessions (or Claude's sessions folder isn't there): then "no chats" means
+// nothing and no folder may be judged by it.
+func (e *Engine) ChatFolders() (dirs []string, ok bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.chatDirs...), e.chatsOK
 }
 
 // Unskip lets a skipped item restore again at the next sync.

@@ -86,6 +86,8 @@ func TestScreens(t *testing.T) {
 	mkProj(fa, "notes.txt", "x")
 	pmA.SetProject(projsync.Project{Key: "name:sketch", Name: "sketch", Folder: fa, Mode: projsync.ModeSync})
 	pmA.SetProject(projsync.Project{Key: "name:website", Name: "website", Folder: t.TempDir(), Mode: projsync.ModeBackup, Ignore: []string{"*.log", "build/"}})
+	// a turned-off project whose folder is long gone
+	pmA.SetProject(projsync.Project{Key: "name:sonix-player", Name: "sonix-player", Folder: filepath.Join(t.TempDir(), "gone-too"), Mode: projsync.ModeOff})
 	// a folder that has gone missing (an unplugged drive, say)
 	pmA.SetProject(projsync.Project{Key: "name:notes", Name: "notes", Folder: filepath.Join(t.TempDir(), "gone"), Mode: projsync.ModeBackup})
 	a.eng.ProjectSync = pmA
@@ -139,6 +141,15 @@ func TestScreens(t *testing.T) {
 	view, refreshView := a.projectFoldersView()
 	var b1, b2, b3 []*widget.Button
 	collectButtons(view, &b1)
+	removes := 0
+	for _, b := range b1 {
+		if b.Text == "Remove from list" {
+			removes++
+		}
+	}
+	if removes != 2 { // the two whose folder is gone, not the ones that exist
+		t.Fatalf("%d Remove buttons, want 2", removes)
+	}
 	fyne.DoAndWait(func() { refreshView() })
 	collectButtons(view, &b2)
 	if len(b1) == 0 || len(b1) != len(b2) || b1[0] != b2[0] {
@@ -172,11 +183,14 @@ func TestScreens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fyne.DoAndWait(func() { a.confirmAddFolder(add, fi) })
+	fyne.DoAndWait(func() { a.confirmAddFolder(add, fi, true) })
 	snap("dialog-add-folder")
 	fyne.DoAndWait(func() { a.win.Canvas().Overlays().Remove(a.win.Canvas().Overlays().Top()) })
 	fyne.DoAndWait(func() { a.win.Resize(fyne.NewSize(760, 1500)) })
 	save("settings-full", a.settingsTab())
+	tall := a.mainUI().(*container.AppTabs)
+	fyne.DoAndWait(func() { tall.SelectIndex(1) })
+	save("projects-tall", tall)
 }
 
 func collectButtons(o fyne.CanvasObject, out *[]*widget.Button) {

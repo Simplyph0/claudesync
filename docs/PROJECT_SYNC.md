@@ -313,6 +313,16 @@ sync until you answer; nothing else is held up.
 already carries it), what is skipped on purpose, files that look like passwords or keys, names Windows can't
 have, files over the limit, and whether it is over the project size limit. Then you choose Back up only or Sync.
 
+**Folders that are gone.** A folder that isn't on this PC any more (even one that's turned Off) shows a warning
+and a one-click **Remove from list**. It only makes ClaudeSync forget the folder here: no files are deleted, the
+server copy stays, and other PCs aren't affected.
+
+**Folders whose chats are gone.** When the last chat that used a folder is deleted, the folder is removed from
+My Folders (Settings → Project folders turns this off). Only this PC's list changes; files and the server copy are
+never touched, and you get a notification. It is careful about it: the folder must have had a chat before, must not
+have been added by hand with Add folder, nothing may be waiting on you, the sessions must have been read properly in
+that sync, and it has to stay chat-less for at least five minutes across two checks.
+
 Safety checks that explain themselves instead of failing quietly:
 
 - A folder that **goes missing** (an unplugged drive, a rename) is never recreated empty: ClaudeSync stops with

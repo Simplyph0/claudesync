@@ -623,6 +623,8 @@ func (a *App) settingsTab() fyne.CanvasObject {
 	maxFile, maxProj, trashDays, trashGB, upCap := num(c.MaxFileMB), num(c.MaxProjectMB), num(c.TrashDays), num(c.TrashGB), num(c.UploadCapMB)
 	lanOnly := widget.NewCheck("Only sync project folders on my home network", nil)
 	lanOnly.SetChecked(c.ProjectsLANOnly)
+	forgetChatless := widget.NewCheck("Remove a folder from My Folders when its last chat is deleted (files and server copy are never touched)", nil)
+	forgetChatless.SetChecked(c.ForgetChatless)
 	readProjectSettings := func(n *appcfg.Settings) error {
 		vals := map[*widget.Entry]*int{maxFile: &n.MaxFileMB, maxProj: &n.MaxProjectMB, trashDays: &n.TrashDays, trashGB: &n.TrashGB, upCap: &n.UploadCapMB}
 		for e, dst := range vals {
@@ -640,6 +642,7 @@ func (a *App) settingsTab() fyne.CanvasObject {
 		n.GitGuard = []string{projsync.GitAsk, projsync.GitSync, projsync.GitSkip}[gitGuard.SelectedIndex()]
 		n.RemoteDeletes = []string{projsync.DeletesTrash, projsync.DeletesAsk}[remoteDel.SelectedIndex()]
 		n.ProjectsLANOnly = lanOnly.Checked
+		n.ForgetChatless = forgetChatless.Checked
 		return nil
 	}
 
@@ -747,6 +750,7 @@ func (a *App) settingsTab() fyne.CanvasObject {
 		widget.NewFormItem("Keep trash (days / GB)", container.NewGridWithColumns(2, trashDays, trashGB)),
 		widget.NewFormItem("Upload limit per sync (MB, 0 = none)", upCap),
 		widget.NewFormItem("", lanOnly),
+		widget.NewFormItem("", forgetChatless),
 	)
 	projNote := widget.NewLabel("Text files changed in different places on two PCs are always merged automatically.\nAn emptied project folder always asks before anything is deleted on your other PCs.")
 	return container.NewVScroll(container.NewPadded(container.NewVBox(form, bold("Project folders"), projNote, projForm, save)))

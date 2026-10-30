@@ -49,6 +49,7 @@ type Settings struct {
 	MaxProjectMB      int    `json:"maxProjectMb"`
 	TrashDays         int    `json:"trashDays"`
 	TrashGB           int    `json:"trashGb"`
+	ForgetChatless    bool   `json:"forgetChatless"` // remove a folder from My Folders once its last chat is deleted
 	ProjectsLANOnly   bool   `json:"projectsLanOnly"`
 	UploadCapMB       int    `json:"uploadCapMb"`
 }
@@ -74,7 +75,7 @@ func Defaults() Settings {
 		Sessions: true, Config: true, Memory: true, Scratch: true, ScratchMaxMB: 200,
 		SearchRoots: roots, StartAtLogin: true,
 		ProjectDefault: "off", ProjectGitDefault: "backup", ClashPolicy: "keep-both", FirstLink: "ask", BigChange: "ask",
-		GitGuard: "ask", RemoteDeletes: "trash", MaxFileMB: 200, MaxProjectMB: 2048, TrashDays: 30, TrashGB: 5,
+		ForgetChatless: true, GitGuard: "ask", RemoteDeletes: "trash", MaxFileMB: 200, MaxProjectMB: 2048, TrashDays: 30, TrashGB: 5,
 	}
 }
 

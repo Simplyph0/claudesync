@@ -73,14 +73,17 @@ func DefaultSettings() Settings {
 
 // Project is one folder's configuration on this PC.
 type Project struct {
-	Key        string   `json:"key"`  // same key as sessions use (git remote or folder name)
-	Name       string   `json:"name"` // shown in lists
-	Folder     string   `json:"folder"`
-	Mode       string   `json:"mode"`
-	Clash      string   `json:"clash,omitempty"`      // "" = use the PC-wide setting
-	AllowLarge bool     `json:"allowLarge,omitempty"` // OK'd going over the size limit
-	Paused     bool     `json:"paused,omitempty"`     // stays set up, but isn't synced until resumed
-	Ignore     []string `json:"ignore,omitempty"`     // "don't sync these" lines (gitignore style), on this PC only
+	Key          string    `json:"key"`  // same key as sessions use (git remote or folder name)
+	Name         string    `json:"name"` // shown in lists
+	Folder       string    `json:"folder"`
+	Mode         string    `json:"mode"`
+	Clash        string    `json:"clash,omitempty"`       // "" = use the PC-wide setting
+	AllowLarge   bool      `json:"allowLarge,omitempty"`  // OK'd going over the size limit
+	Paused       bool      `json:"paused,omitempty"`      // stays set up, but isn't synced until resumed
+	Ignore       []string  `json:"ignore,omitempty"`      // "don't sync these" lines (gitignore style), on this PC only
+	Manual       bool      `json:"manual,omitempty"`      // added by hand with Add folder: never removed because its chats are gone
+	ChatSeen     bool      `json:"chatSeen,omitempty"`    // a chat on this PC has used this folder
+	NoChatsSince time.Time `json:"noChatsSince,omitzero"` // since when no chat uses it (see ReconcileChats)
 }
 
 // Decision is something waiting for the user because a setting says "ask".

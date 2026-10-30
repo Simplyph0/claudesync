@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -284,7 +287,7 @@ func (a *App) projectFoldersView() (fyne.CanvasObject, func() int) {
 			box.Add(bold("Folders your chats use that aren't set up"))
 			for _, kv := range chatOnly {
 				folder := kv[strings.Index(kv, "\x00")+1:]
-				row := container.NewBorder(nil, nil, nil, widget.NewButton("Set up…", func() { a.addFolder(folder) }),
+				row := container.NewBorder(nil, nil, nil, widget.NewButton("Set up…", func() { a.addFolder(folder, false) }),
 					container.NewVBox(bold(filepath.Base(folder)), subtle(folder)))
 				box.Add(row)
 			}
@@ -353,6 +356,10 @@ func (a *App) projectCard(s projsync.Status) fyne.CanvasObject {
 	folder.Truncation = fyne.TextTruncateEllipsis
 
 	parts := []fyne.CanvasObject{title, folder}
+	missing := folderMissing(s.Folder)
+	if missing && (s.Mode == projsync.ModeOff || s.Paused || s.Error == "") {
+		parts = append(parts, importantLabel("⚠ This folder isn't on this PC any more (moved, renamed, deleted, or on a drive that isn't plugged in).", widget.WarningImportance))
+	}
 	switch {
 	case s.Mode == projsync.ModeOff:
 		parts = append(parts, subtle("Not synced. Open Details to turn it on."))
@@ -403,11 +410,17 @@ func (a *App) projectCard(s projsync.Status) fyne.CanvasObject {
 	}
 
 	syncBtn := widget.NewButtonWithIcon("Sync now", theme.ViewRefreshIcon(), func() { a.syncProject(s.Key) })
-	if s.Mode == projsync.ModeOff || s.Paused || s.Active {
+	if s.Mode == projsync.ModeOff || s.Paused || s.Active || missing {
 		syncBtn.Disable()
 	}
 	detail := widget.NewButtonWithIcon("Details", theme.SettingsIcon(), func() { a.projectDetails(s.Key) })
-	parts = append(parts, container.NewHBox(syncBtn, detail))
+	buttons := container.NewHBox(syncBtn, detail)
+	if missing {
+		remove := widget.NewButtonWithIcon("Remove from list", theme.DeleteIcon(), func() { a.confirmForget(s.Key, s.Name) })
+		remove.Importance = widget.HighImportance
+		buttons = container.NewHBox(remove, detail)
+	}
+	parts = append(parts, buttons)
 	return widget.NewCard("", "", container.NewVBox(parts...))
 }
 
@@ -415,8 +428,8 @@ func (a *App) projectCard(s projsync.Status) fyne.CanvasObject {
 // cards are only rebuilt when something on them changes.
 func projectSig(s projsync.Status) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s|%s|%s|%s|%t|%t|%s|%s|%s|%s|%s|%d|", s.Key, s.Name, s.Folder, s.Mode, s.Paused, s.Active, s.Status, s.Error, s.Fix, s.OnHold,
-		relTime(s.LastSync), len(s.Skipped))
+	fmt.Fprintf(&b, "%s|%s|%s|%s|%t|%t|%s|%s|%s|%s|%s|%d|%t|", s.Key, s.Name, s.Folder, s.Mode, s.Paused, s.Active, s.Status, s.Error, s.Fix, s.OnHold,
+		relTime(s.LastSync), len(s.Skipped), folderMissing(s.Folder))
 	if s.Decision != nil {
 		b.WriteString(s.Decision.Kind + s.Decision.Message)
 	}
@@ -427,6 +440,33 @@ func projectSig(s projsync.Status) string {
 		fmt.Fprintf(&b, "|%d|%d|%s", s.Last.Files, s.Last.Bytes, s.Last.Summary())
 	}
 	return b.String() + ";"
+}
+
+// folderMissing reports whether a folder is definitely not there.
+func folderMissing(folder string) bool {
+	_, err := os.Stat(folder)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// confirmForget asks, then removes a folder from My Folders on this PC.
+func (a *App) confirmForget(key, name string) {
+	dialog.ShowConfirm("Remove "+name+" from My Folders?", "ClaudeSync forgets this folder on this PC.\n\nNothing else changes: no files are deleted, and the copy on the server stays (delete it under Projects → On the server if you want it gone). Other PCs aren't affected.", func(ok bool) {
+		if !ok {
+			return
+		}
+		pm := a.projects()
+		if pm == nil {
+			return
+		}
+		if err := pm.Forget(key); err != nil {
+			a.showProblem("Couldn't remove it", err, "")
+			return
+		}
+		a.log.Printf("project %s: removed from My Folders", name)
+		if a.refreshUI != nil {
+			a.refreshUI()
+		}
+	}, a.win)
 }
 
 // syncProject syncs one folder now.
@@ -552,7 +592,7 @@ func (a *App) pickFolderToAdd() {
 			return
 		}
 		if u != nil {
-			a.addFolder(u.Path())
+			a.addFolder(u.Path(), true)
 		}
 	}, a.win)
 	d.Resize(fyne.NewSize(700, 500))
@@ -560,7 +600,7 @@ func (a *App) pickFolderToAdd() {
 }
 
 // addFolder looks at a folder and lets you choose what to do with it.
-func (a *App) addFolder(folder string) {
+func (a *App) addFolder(folder string, manual bool) {
 	pm := a.projects()
 	if pm == nil {
 		return
@@ -575,12 +615,12 @@ func (a *App) addFolder(folder string) {
 				a.showProblem("Can't use that folder", err, folder)
 				return
 			}
-			a.confirmAddFolder(folder, fi)
+			a.confirmAddFolder(folder, fi, manual)
 		})
 	}()
 }
 
-func (a *App) confirmAddFolder(folder string, fi projsync.FolderInfo) {
+func (a *App) confirmAddFolder(folder string, fi projsync.FolderInfo, manual bool) {
 	pm := a.projects()
 	ref := syncer.DescribeProject(folder)
 	c := a.settings()
@@ -626,9 +666,10 @@ func (a *App) confirmAddFolder(folder string, fi projsync.FolderInfo) {
 		if !ok {
 			return
 		}
-		p := projsync.Project{Key: ref.Key, Name: filepath.Base(folder), Folder: folder, Mode: modeValues[1:][indexOf(modeLong[1:], mode.Selected)]}
+		p := projsync.Project{Key: ref.Key, Name: filepath.Base(folder), Folder: folder, Mode: modeValues[1:][indexOf(modeLong[1:], mode.Selected)], Manual: manual, ChatSeen: !manual}
 		if has {
 			p.Clash, p.Paused, p.Ignore, p.AllowLarge = existing.Clash, existing.Paused, existing.Ignore, existing.AllowLarge
+			p.Manual, p.ChatSeen = existing.Manual || manual, existing.ChatSeen || !manual
 		}
 		a.saveProject(p)
 	}, a.win)
