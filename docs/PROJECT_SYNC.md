@@ -313,6 +313,12 @@ sync until you answer; nothing else is held up.
 already carries it), what is skipped on purpose, files that look like passwords or keys, names Windows can't
 have, files over the limit, and whether it is over the project size limit. Then you choose Back up only or Sync.
 
+**Starting over after a delete.** If a project's copy on the server was deleted for good, its card asks
+"Start a new copy from this folder?". Nothing is uploaded until you say yes on that PC, so a delete can't be
+undone behind your back by another PC. After yes, this PC's folder becomes the new original and other PCs follow
+it: files that aren't in it go to their project trash. (This is also how to make one PC's folder replace another's
+without merging: delete the server copy for good, then start a new copy from the PC that should win.)
+
 **Folders that are gone.** A folder that isn't on this PC any more (even one that's turned Off) shows a warning
 and a one-click **Remove from list**. It only makes ClaudeSync forget the folder here: no files are deleted, the
 server copy stays, and other PCs aren't affected.

@@ -651,6 +651,13 @@ func (m *Manager) backup(ctx context.Context, p Project) error {
 			h, err = m.putManifest(ctx, id, vs[len(vs)-1].Version, man)
 		}
 	}
+	if errors.Is(err, client.ErrPurged) {
+		proceed, perr := m.handlePurged(ctx, p, id)
+		if !proceed {
+			return perr
+		}
+		h, err = m.putManifest(ctx, id, 0, man)
+	}
 	if err != nil {
 		return err
 	}
@@ -920,7 +927,13 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	if err != nil {
 		return err
 	}
-	if rh.Removed {
+	if rh.Purged {
+		proceed, err := m.handlePurged(ctx, p, id)
+		if !proceed {
+			return err
+		}
+		R, rh = nil, proto.ItemHeader{} // a new copy starts from this folder
+	} else if rh.Removed {
 		m.setStatus(p.Key, "removed from the server backup; not syncing", nil)
 		return nil
 	}
@@ -1482,4 +1495,25 @@ func checkFolder(folder string, syncedBefore int) error {
 	default:
 		return err
 	}
+}
+
+// handlePurged deals with a project whose copy on the server was deleted for
+// good. Nothing is uploaded again until the user says, on this PC, to start a
+// new copy from this folder; otherwise a PC that still syncs the project would
+// quietly undo a delete someone meant. proceed is true once the new copy may
+// be started.
+func (m *Manager) handlePurged(ctx context.Context, p Project, id string) (proceed bool, err error) {
+	if m.once(p.Key, "purged") != "yes" {
+		return false, m.waitFor(p.Key, &Decision{Kind: "purged",
+			Message: fmt.Sprintf("The copy of %s on the server was deleted for good. Start a new copy from this PC's folder? The files here are kept, and your other PCs will follow the new copy.", p.Name)})
+	}
+	if err := m.API.Revive(ctx, proto.KindProject, id); err != nil {
+		return false, err
+	}
+	m.mu.Lock()
+	m.resetLocked(p.Key)
+	m.eventLocked(p.Key, "info", "Started a new copy on the server from this folder.")
+	err = m.saveStateLocked(p.Key)
+	m.mu.Unlock()
+	return err == nil, err
 }

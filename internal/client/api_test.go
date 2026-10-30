@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Simplyph0/claudesync/internal/proto"
 	"github.com/Simplyph0/claudesync/internal/server"
 )
 
@@ -103,5 +104,51 @@ func TestPurgeNeedsANewServer(t *testing.T) {
 	_, err = New("", old.URL, "", "tok").Purge(ctx, "session", "local_x")
 	if !errors.Is(err, ErrServerTooOld) {
 		t.Fatalf("an old server's answer was taken as success: %v", err)
+	}
+}
+
+func TestReviveAndPurgedErrors(t *testing.T) {
+	st, err := server.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetPassword("password123")
+	ts := httptest.NewServer(server.New(st).Handler())
+	defer ts.Close()
+	ctx := context.Background()
+	c := New("", ts.URL, "", "")
+	resp, err := c.Login(ctx, "password123", "pc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Token = resp.Token
+	if _, err := c.PutManifest(ctx, "project", "prj_x", proto.ManifestUpload{Blob: []byte("m"), Refs: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Purge(ctx, "project", "prj_x"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.PutManifest(ctx, "project", "prj_x", proto.ManifestUpload{Base: 1, Blob: []byte("m"), Refs: []string{}})
+	if !errors.Is(err, ErrPurged) || !errors.Is(err, ErrRemoved) {
+		t.Fatalf("an upload after deleting for good: %v", err)
+	}
+	if err := c.Revive(ctx, "project", "prj_x"); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := c.PutManifest(ctx, "project", "prj_x", proto.ManifestUpload{Blob: []byte("m"), Refs: []string{}}); err != nil || h.Version != 1 {
+		t.Fatalf("a new copy: %+v %v", h, err)
+	}
+	// only removed (not deleted for good) is a different error
+	c.Remove(ctx, "project", "prj_x")
+	_, err = c.PutManifest(ctx, "project", "prj_x", proto.ManifestUpload{Base: 1, Blob: []byte("m"), Refs: []string{}})
+	if errors.Is(err, ErrPurged) || !errors.Is(err, ErrRemoved) {
+		t.Fatalf("a plain removal looked like a deletion: %v", err)
+	}
+
+	// a server from before reviving doesn't know the request
+	old := httptest.NewServer(http.NotFoundHandler())
+	defer old.Close()
+	if err := New("", old.URL, "", "tok").Revive(ctx, "project", "prj_x"); !errors.Is(err, ErrServerTooOld) {
+		t.Fatalf("an old server's 404: %v", err)
 	}
 }

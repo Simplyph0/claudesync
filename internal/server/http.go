@@ -58,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/chunks/{id}", s.auth(s.putChunkBlob))
 	mux.Handle("GET /api/chunks/{id}", s.auth(s.getChunkBlob))
 	mux.Handle("POST /api/items/{kind}/{id}/restore", s.auth(s.restoreItem))
+	mux.Handle("POST /api/items/{kind}/{id}/revive", s.auth(s.reviveItem))
 	mux.Handle("POST /api/uploads", s.auth(s.startUpload))
 	mux.Handle("PUT /api/uploads/{upload}/{n}", s.auth(s.putChunk))
 	mux.Handle("POST /api/uploads/{upload}/commit/{kind}/{id}", s.auth(s.commitUpload))
@@ -391,6 +392,15 @@ func (s *Server) restoreItem(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Logf("device %q brought back %s", deviceFrom(r).Name, h.Key())
 	writeJSON200(w, h)
+}
+
+// reviveItem lets a project that was deleted for good start over.
+func (s *Server) reviveItem(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.Revive(r.PathValue("kind"), r.PathValue("id")); !s.check(w, err) {
+		return
+	}
+	s.Logf("device %q started a new copy of %s/%s after it was deleted for good", deviceFrom(r).Name, r.PathValue("kind"), r.PathValue("id"))
+	writeJSON200(w, struct{}{})
 }
 
 // putManifest stores a project version together with the chunks it uses.

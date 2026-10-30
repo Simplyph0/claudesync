@@ -30,7 +30,7 @@ var (
 	ErrBadPassword  = errors.New("wrong password")
 	ErrNotInitDone  = errors.New("server has no password yet; run 'claudesync-server init'")
 	ErrRemoved      = errors.New("this item was removed from the server backup")
-	ErrPurged       = errors.New("this item was deleted from the server for good")
+	ErrPurged       = fmt.Errorf("%w: it was deleted for good", ErrRemoved)
 	ErrInvalidInput = errors.New("invalid input")
 )
 
@@ -316,6 +316,9 @@ func (s *Store) PutRefs(dev proto.Device, kind, id string, base int, blob, meta 
 	key := kind + "/" + id
 	m := s.idx.Items[key]
 	if m != nil && m.Removed {
+		if m.Purged {
+			return proto.ItemHeader{}, ErrPurged
+		}
 		return proto.ItemHeader{}, ErrRemoved
 	}
 	latest := 0
@@ -435,6 +438,30 @@ func (s *Store) Purge(kind, id string) (proto.ItemHeader, error) {
 	m.Purged = true
 	h, _ := m.latest()
 	return h, s.saveIndexLocked()
+}
+
+// Revive lifts the marker of a project that was deleted for good, so a new
+// copy can be started under the same name. Only projects: a deleted chat's
+// marker must stay, or a PC that still has the chat would upload it again.
+// Reviving something that isn't there is fine (nothing to do); something that
+// is there and wasn't deleted for good is refused (bring it back instead).
+func (s *Store) Revive(kind, id string) error {
+	if kind != proto.KindProject {
+		return ErrInvalidInput
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.idx.Items[kind+"/"+id]
+	if m == nil {
+		return nil
+	}
+	if !m.Purged {
+		return ErrInvalidInput
+	}
+	_ = os.RemoveAll(filepath.Join(s.dir, "items", kind, id))
+	delete(s.idx.Items, kind+"/"+id)
+	s.idx.Seq++
+	return s.saveIndexLocked()
 }
 
 // PurgeRemoved deletes items removed longer than the hold period ago (never

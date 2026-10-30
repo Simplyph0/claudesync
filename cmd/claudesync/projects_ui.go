@@ -558,6 +558,9 @@ func (a *App) questionBox(key string, d *projsync.Decision, c *projsync.Clash) f
 	case "local-deletes":
 		buttons = []fyne.CanvasObject{btn("Put them back here", "restore", true), btn("Delete on my other PCs too", "yes", false)}
 		help = "If a drive isn't plugged in or a folder was emptied by mistake, put them back."
+	case "purged":
+		buttons = []fyne.CanvasObject{btn("Start a new copy from this folder", "yes", true), btn("Not now", "no", false)}
+		help = "Deleting it from the server was permanent. A new copy uploads this PC's folder as the new original, and your other PCs then follow it. Files here are kept. To drop the folder instead, open Details and choose Stop managing."
 	case "large":
 		buttons = []fyne.CanvasObject{btn("Go ahead", "yes", true), btn("Turn this folder off", "no", false)}
 	case "git":

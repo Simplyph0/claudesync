@@ -360,8 +360,9 @@ func TestSyncAnywayIsRemembered(t *testing.T) {
 }
 
 // A project whose server copy was deleted for good doesn't sync or back up
-// again, says why in words, and never touches the files on this PC.
-func TestDeletedProjectOnServer(t *testing.T) {
+// behind your back: it asks, nothing is uploaded until you say so, "Not now"
+// sticks, and files on this PC are never touched.
+func TestDeletedProjectOnServerAsksBeforeStartingOver(t *testing.T) {
 	for _, mode := range []string{ModeSync, ModeBackup} {
 		t.Run(mode, func(t *testing.T) {
 			w := newWorld(t)
@@ -376,19 +377,78 @@ func TestDeletedProjectOnServer(t *testing.T) {
 				t.Fatal(err)
 			}
 			a.write("a.txt", "2", time.Hour)
-			err := a.syncErr()
-			st := a.status()
-			if mode == ModeBackup {
-				if err == nil || !strings.Contains(st.Error, "removed or deleted") || st.Fix == "" {
-					t.Fatalf("not explained: %v %+v", err, st)
-				}
-			} else if err != nil || !strings.Contains(st.Status, "removed from the server") {
-				t.Fatalf("sync of a deleted project: %v %+v", err, st)
+			if err := a.syncErr(); err != nil {
+				t.Fatalf("an error instead of a question: %v", err)
+			}
+			if d := a.status().Decision; d == nil || d.Kind != "purged" || !strings.Contains(d.Message, "deleted for good") {
+				t.Fatalf("no question: %+v", a.status())
 			}
 			eq(t, "files untouched", a.read("a.txt"), "2")
 			if rp, _ := a.m.RemoteProjects(context.Background()); len(rp) != 1 || !rp[0].Removed || rp[0].Version != 1 {
-				t.Fatalf("something was uploaded again: %+v", rp)
+				t.Fatalf("something was uploaded without asking: %+v", rp)
 			}
+
+			// Not now: stays quiet.
+			a.m.Decide(key, "no")
+			a.sync()
+			a.sync()
+			if st := a.status(); st.Decision != nil || st.OnHold == "" {
+				t.Fatalf("asked again: %+v", st)
+			}
+
+			// Yes: a new copy, from this folder.
+			a.m.AskAgain(key)
+			if err := a.syncErr(); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.m.Decide(key, "yes"); err != nil {
+				t.Fatal(err)
+			}
+			a.sync()
+			rp, _ = a.m.RemoteProjects(context.Background())
+			if len(rp) != 1 || rp[0].Removed || rp[0].Version != 1 {
+				t.Fatalf("no new copy: %+v", rp)
+			}
+			if st := a.status(); st.Decision != nil || st.Error != "" || st.OnHold != "" {
+				t.Fatalf("not settled: %+v", st)
+			}
+			eq(t, "files kept", a.read("a.txt"), "2")
+			a.sync() // and it keeps working
 		})
+	}
+}
+
+// The scenario that matters: delete the server copy, start a new one from one PC's
+// folder, and another PC follows it: what is gone there is trashed, not merged.
+func TestAnotherPCFollowsTheNewCopy(t *testing.T) {
+	w := newWorld(t)
+	a := w.pc("A", ModeSync)
+	b := w.pc("B", ModeSync)
+	a.write("keep.txt", "k", time.Hour)
+	a.write("old.txt", "only on the old copy", time.Hour)
+	a.sync()
+	b.sync()
+	eq(t, "B has both", len(b.list()), 2)
+
+	rp, _ := a.m.RemoteProjects(context.Background())
+	if _, err := a.m.API.Purge(context.Background(), "project", rp[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(a.folder, "old.txt"))
+	a.write("keep.txt", "new", time.Hour)
+	a.write("fresh.txt", "f", time.Hour)
+	a.syncErr()
+	a.m.Decide(key, "yes")
+	a.sync()
+
+	b.sync()
+	eq(t, "B got the new version", b.read("keep.txt"), "new")
+	eq(t, "B got the new file", b.read("fresh.txt"), "f")
+	eq(t, "B lost the old one", b.read("old.txt"), "<missing>")
+	if !b.trashHas("old.txt", "only on the old copy") {
+		t.Fatal("B's replaced file isn't in the trash")
+	}
+	if st := b.status(); st.Decision != nil || st.Error != "" {
+		t.Fatalf("B was left asking: %+v", st)
 	}
 }

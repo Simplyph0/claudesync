@@ -123,7 +123,10 @@ After setup ClaudeSync lives in the tray:
 - **Delete for good:** **Delete from server for good…** (History tab, and Projects → On the server)
   erases every saved version straight away. It can't be undone, and nothing is deleted from any PC.
   A tiny marker stays on the server so that no PC uploads the item again. Disk space is freed within
-  a day. **Delete all removed for good…** does this for everything you've removed. Needs the server
+  a day. **Delete all removed for good…** does this for everything you've removed. A **project** you
+  deleted for good can start over: its card asks "Start a new copy from this folder?", and only after you
+  say yes on that PC is anything uploaded; other PCs then follow the new copy (what is gone from it goes to
+  their project trash). A deleted chat can't be brought back this way. Needs the server
   updated to the same version (an older server says so and only removes the item).
 - **Skip on one PC:** **Skip** next to an item waiting to restore keeps it off that PC
   only. **Skipped on this PC…** lists skipped items so you can un-skip them.

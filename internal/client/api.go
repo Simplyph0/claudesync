@@ -30,6 +30,7 @@ var (
 	ErrUnauthorized = errors.New("unauthorized")
 	ErrPinMismatch  = errors.New("server certificate does not match the fingerprint you confirmed")
 	ErrRemoved      = errors.New("removed from the server backup")
+	ErrPurged       = errors.New("deleted from the server for good")
 	ErrServerTooOld = errors.New("the server is too old to delete for good; it only removed the item")
 )
 
@@ -210,6 +211,9 @@ func checkStatus(resp *http.Response) error {
 	case http.StatusUnauthorized:
 		return fmt.Errorf("%w: %v", ErrUnauthorized, apiErr)
 	case http.StatusGone:
+		if strings.Contains(apiErr.Msg, "for good") { // also counts as removed, for callers that only care about that
+			return fmt.Errorf("%w: %w: %v", ErrPurged, ErrRemoved, apiErr)
+		}
 		return fmt.Errorf("%w: %v", ErrRemoved, apiErr)
 	}
 	return apiErr
@@ -354,6 +358,17 @@ func (c *Client) Purge(ctx context.Context, kind, id string) (proto.ItemHeader, 
 		return h, ErrServerTooOld
 	}
 	return h, nil
+}
+
+// Revive lets a project deleted for good start over under the same name.
+// Only the project's own PC should ask, after the user said so.
+func (c *Client) Revive(ctx context.Context, kind, id string) error {
+	var out struct{}
+	err := c.call(ctx, "POST", "/api/items/"+kind+"/"+id+"/revive", nil, &out)
+	if errors.Is(err, ErrNotFound) { // a server from before this doesn't know the request
+		return ErrServerTooOld
+	}
+	return err
 }
 
 // BringBack undoes Remove.

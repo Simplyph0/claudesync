@@ -37,9 +37,12 @@ func Explain(err error, folder string) Problem {
 	case errors.Is(err, client.ErrServerTooOld):
 		return Problem{"Your ClaudeSync server is too old to delete things for good. It only removed the item, which can still be brought back.",
 			"Update claudesync-server on your server to this version, then delete it again."}
+	case errors.Is(err, client.ErrPurged):
+		return Problem{"This folder's copy on the server was deleted for good.",
+			"Open the folder's card: it asks whether to start a new copy from this folder."}
 	case errors.Is(err, client.ErrRemoved):
-		return Problem{"This folder's copy on the server was removed or deleted, so it can't be backed up or synced any more.",
-			"If you only removed it, bring it back in the History tab (\"Show removed\"). If it was deleted for good, stop managing the folder here; the same project can't be backed up again under the same name."}
+		return Problem{"This folder's copy on the server was removed, so it can't be backed up or synced any more.",
+			"Bring it back in the History tab (\"Show removed\")."}
 	case errors.Is(err, client.ErrUnauthorized):
 		return Problem{"The server doesn't recognise this PC any more.",
 			"Open the Server tab and sign in again. Your files and settings are untouched."}

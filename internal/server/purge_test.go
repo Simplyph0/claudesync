@@ -108,3 +108,46 @@ func TestPurgeAfterRemove(t *testing.T) {
 		t.Fatalf("%+v %v", h, err)
 	}
 }
+
+// A project deleted for good can start over under the same name; a chat can't.
+func TestReviveLetsAProjectStartOver(t *testing.T) {
+	st, _ := Open(t.TempDir())
+	dev := proto.Device{ID: "d1", Name: "pc"}
+	c := "k" + strings.Repeat("d", 64)
+	st.StoreChunk(c, []byte("x"))
+	st.PutRefs(dev, "project", "prj_x", 0, []byte("m"), []byte("meta"), []string{c})
+	st.Put(dev, "session", "local_x", 0, []byte("chat"), nil)
+
+	if err := st.Revive("project", "prj_x"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("reviving something that wasn't deleted for good: %v", err)
+	}
+	st.SetRemoved("project", "prj_x", true)
+	if err := st.Revive("project", "prj_x"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("reviving something only removed: %v", err)
+	}
+	if _, err := st.Purge("project", "prj_x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutRefs(dev, "project", "prj_x", 1, []byte("m"), nil, nil); !errors.Is(err, ErrRemoved) {
+		t.Fatalf("upload before reviving: %v", err)
+	}
+	if err := st.Revive("project", "prj_x"); err != nil {
+		t.Fatal(err)
+	}
+	h, err := st.PutRefs(dev, "project", "prj_x", 0, []byte("m2"), nil, nil)
+	if err != nil || h.Version != 1 || h.Removed || h.Purged {
+		t.Fatalf("a fresh start: %+v %v", h, err)
+	}
+	if err := st.Revive("project", "prj_nothing"); err != nil {
+		t.Fatalf("reviving what isn't there: %v", err)
+	}
+
+	// a deleted chat stays deleted: reviving it would let a PC that still has it upload it again
+	st.Purge("session", "local_x")
+	if err := st.Revive("session", "local_x"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("revived a chat: %v", err)
+	}
+	if _, err := st.Put(dev, "session", "local_x", 1, []byte("again"), nil); !errors.Is(err, ErrRemoved) {
+		t.Fatalf("a deleted chat can be uploaded again: %v", err)
+	}
+}
