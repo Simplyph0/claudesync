@@ -355,3 +355,10 @@ pick **Sync** for it.
 2. Keep both is the default clash rule.
 3. Pushed git projects default to Back up only.
 4. Limits: 200 MB per file, 2 GB per project (asks above), trash 30 days / 5 GB. All adjustable.
+
+## Replace one side with the other
+
+On a folder's card, **Replace…** (also offered on the git-branch question) lets one side win outright, with no merging and no further questions:
+
+- **Replace the server copy with this PC's folder**: the server becomes exactly this folder; files only on the server are deleted there, and other PCs remove them into their project trash.
+- **Replace this PC's folder with the server copy**: this folder becomes exactly the server copy; anything here that differs or isn't on the server goes to Recover → Project trash first.

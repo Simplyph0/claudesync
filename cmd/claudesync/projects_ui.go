@@ -414,7 +414,11 @@ func (a *App) projectCard(s projsync.Status) fyne.CanvasObject {
 		syncBtn.Disable()
 	}
 	detail := widget.NewButtonWithIcon("Details", theme.SettingsIcon(), func() { a.projectDetails(s.Key) })
-	buttons := container.NewHBox(syncBtn, detail)
+	replaceBtn := widget.NewButtonWithIcon("Replace…", theme.MediaReplayIcon(), func() { a.replaceDialog(s.Key, s.Name, s.Mode) })
+	if s.Mode == projsync.ModeOff || s.Paused || s.Active || missing {
+		replaceBtn.Disable()
+	}
+	buttons := container.NewHBox(syncBtn, replaceBtn, detail)
 	if missing {
 		remove := widget.NewButtonWithIcon("Remove from list", theme.DeleteIcon(), func() { a.confirmForget(s.Key, s.Name) })
 		remove.Importance = widget.HighImportance
@@ -467,6 +471,50 @@ func (a *App) confirmForget(key, name string) {
 			a.refreshUI()
 		}
 	}, a.win)
+}
+
+// replaceDialog offers the two one-way replacements for a folder.
+func (a *App) replaceDialog(key, name, mode string) {
+	var d dialog.Dialog
+	pick := func(dir, title, msg string) func() {
+		return func() {
+			d.Hide()
+			dialog.ShowConfirm(title, msg, func(ok bool) {
+				if ok {
+					a.replace(key, dir)
+				}
+			}, a.win)
+		}
+	}
+	toServer := widget.NewButton("Replace the server copy with this PC's folder", pick(projsync.ForceServer, "Replace the server copy?",
+		"The server copy of "+name+" will become exactly this folder. Files that are only on the server are deleted there, and your other PCs will remove them too (into their project trash).\n\nThis PC's files are not touched. Nothing is asked about git branches."))
+	toServer.Importance = widget.HighImportance
+	toPC := widget.NewButton("Replace this PC's folder with the server copy", pick(projsync.ForcePC, "Replace this PC's folder?",
+		"This folder will become exactly the server copy of "+name+". Files that are only here, or that differ, are moved to the project trash first (Recover → Project trash), then replaced.\n\nThe server copy is not touched. Nothing is asked about git branches."))
+	if mode != projsync.ModeSync {
+		toPC.Disable()
+	}
+	body := container.NewVBox(
+		wrapLabel("Pick one side to win. Nothing is merged: the other side is made to match it."),
+		toServer, toPC)
+	if mode != projsync.ModeSync {
+		body.Add(subtle("The second option needs this folder set to Sync (it's Back up only)."))
+	}
+	d = dialog.NewCustom("Replace "+name, "Cancel", body, a.win)
+	d.Show()
+}
+
+// replace starts a one-way replacement and syncs the folder right away.
+func (a *App) replace(key, dir string) {
+	pm := a.projects()
+	if pm == nil {
+		return
+	}
+	if err := pm.Override(key, dir); err != nil {
+		a.showProblem("Couldn't start that", err, "")
+		return
+	}
+	a.syncProject(key)
 }
 
 // syncProject syncs one folder now.
@@ -548,7 +596,7 @@ func (a *App) questionBox(key string, d *projsync.Decision, c *projsync.Clash) f
 			btn("Keep mine", "mine", false), btn("Take theirs", "theirs", false), btn("Keep both", "both", true)),
 			subtle("Keep both saves the other copy next to yours. Whatever is replaced goes to the trash first."))
 	}
-	var buttons []fyne.CanvasObject
+	var buttons, extra []fyne.CanvasObject
 	help := ""
 	switch d.Kind {
 	case "first-link":
@@ -565,7 +613,10 @@ func (a *App) questionBox(key string, d *projsync.Decision, c *projsync.Clash) f
 		buttons = []fyne.CanvasObject{btn("Go ahead", "yes", true), btn("Turn this folder off", "no", false)}
 	case "git":
 		buttons = []fyne.CanvasObject{btn("Sync anyway", "yes", false), btn("Not now", "no", true)}
-		help = "Two PCs on different git branches or commits would swap files that belong to different versions of the project."
+		extra = []fyne.CanvasObject{
+			widget.NewButton("Replace the server copy with this PC", func() { a.replace(key, projsync.ForceServer) }),
+			widget.NewButton("Replace this PC with the server copy", func() { a.replace(key, projsync.ForcePC) })}
+		help = "Replace the server copy: the server becomes exactly this folder (no mixing). Replace this PC: this folder becomes exactly the server copy (yours goes to the project trash first).\nSync anyway mixes files from two different branches or commits."
 	default: // deletes, big-change
 		buttons = []fyne.CanvasObject{btn("Go ahead", "yes", true), btn("Not now", "no", false)}
 		help = "The files go to the project trash, not away for good."
@@ -581,6 +632,9 @@ func (a *App) questionBox(key string, d *projsync.Decision, c *projsync.Clash) f
 		parts = append(parts, subtle(strings.Join(show, "\n")+more))
 	}
 	parts = append(parts, container.NewHBox(buttons...))
+	if len(extra) > 0 {
+		parts = append(parts, container.NewHBox(extra...))
+	}
 	if help != "" {
 		parts = append(parts, subtle(help))
 	}

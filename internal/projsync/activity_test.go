@@ -452,3 +452,75 @@ func TestAnotherPCFollowsTheNewCopy(t *testing.T) {
 		t.Fatalf("B was left asking: %+v", st)
 	}
 }
+
+// "Replace the server copy": the server becomes exactly this PC, no questions.
+func TestReplaceServerCopyWithThisPC(t *testing.T) {
+	w := newWorld(t)
+	a := w.pc("A", ModeSync)
+	setGitHead(a, "main", "aaa111")
+	a.write("keep.txt", "old", time.Hour)
+	a.write("only-server.txt", "x", time.Hour)
+	a.sync()
+	b := w.pc("B", ModeSync)
+	setGitHead(b, "main", "bbb222")
+	b.write("keep.txt", "new from B", 0)
+	b.write("b-only.txt", "b", time.Hour)
+	b.sync()
+	if d := b.status().Decision; d == nil || d.Kind != "git" {
+		t.Fatalf("expected the git question: %+v", d)
+	}
+	if err := b.m.Override(key, ForceServer); err != nil {
+		t.Fatal(err)
+	}
+	b.sync()
+	if st := b.status(); st.Decision != nil || st.Error != "" {
+		t.Fatalf("still asking or failed: %+v", st)
+	}
+	eq(t, "B untouched", noGit(b.list()), []string{"b-only.txt", "keep.txt"})
+	// A follows: it now has exactly B's files, its own extras in trash.
+	a.m.Override(key, ForcePC)
+	a.sync()
+	eq(t, "A matches B", noGit(a.list()), []string{"b-only.txt", "keep.txt"})
+	eq(t, "content", a.read("keep.txt"), "new from B")
+	if !a.trashHas("only-server.txt", "x") {
+		t.Error("replaced file not in trash")
+	}
+	if a.m.stateLocked(key).Force != "" {
+		t.Error("force not cleared")
+	}
+}
+
+// "Replace this PC": this folder becomes the server copy, no questions.
+func TestReplaceThisPCWithServerCopy(t *testing.T) {
+	w := newWorld(t)
+	a := w.pc("A", ModeSync)
+	setGitHead(a, "main", "aaa111")
+	a.write("s.txt", "server", time.Hour)
+	a.sync()
+	b := w.pc("B", ModeSync)
+	setGitHead(b, "dev", "bbb222")
+	b.write("s.txt", "different", 0)
+	b.write("mine.txt", "m", time.Hour)
+	if err := b.m.Override(key, ForcePC); err != nil {
+		t.Fatal(err)
+	}
+	b.sync()
+	if st := b.status(); st.Decision != nil || st.Error != "" {
+		t.Fatalf("asked or failed: %+v", st)
+	}
+	eq(t, "B matches server", noGit(b.list()), []string{"s.txt"})
+	eq(t, "content", b.read("s.txt"), "server")
+	if !b.trashHas("mine.txt", "m") || !b.trashHas("s.txt", "different") {
+		t.Error("B's files not saved to trash")
+	}
+}
+
+func noGit(l []string) []string {
+	var out []string
+	for _, f := range l {
+		if !strings.HasPrefix(f, ".git/") {
+			out = append(out, f)
+		}
+	}
+	return out
+}

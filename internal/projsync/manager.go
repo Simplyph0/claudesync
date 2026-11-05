@@ -128,6 +128,7 @@ type pstate struct {
 	Snoozed     map[string]string     `json:"snoozed,omitempty"`  // decision kind -> the question you said "Not now" to
 	Approved    map[string]string     `json:"approved,omitempty"` // decision kind -> the question you said yes to, for these exact facts
 	Hold        string                `json:"hold,omitempty"`     // the snoozed question that kept the last sync from running
+	Force       string                `json:"force,omitempty"`    // ForceServer / ForcePC: one sync that makes one side match the other
 	Fix         string                `json:"fix,omitempty"`      // what to do about Error
 	Detail      string                `json:"detail,omitempty"`   // the raw error, for bug reports
 	Last        *Result               `json:"last,omitempty"`
@@ -436,6 +437,42 @@ func (m *Manager) ResolveClash(key, p, choice string) error {
 	return m.saveStateLocked(key)
 }
 
+// What Override can do.
+const (
+	ForceServer = "server" // make the server copy exactly match this PC
+	ForcePC     = "pc"     // make this PC's folder exactly match the server copy
+)
+
+// Override makes the next sync of a project a one-way replacement: with
+// ForceServer the server copy becomes exactly this folder (files only on the
+// server are deleted there); with ForcePC this folder becomes exactly the
+// server copy (files only here go to the project trash). It skips every
+// "are you sure" question, because choosing it is the answer.
+func (m *Manager) Override(key, dir string) error {
+	if dir != ForceServer && dir != ForcePC {
+		return errors.New("choose server or pc")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.projects[key]
+	if p == nil {
+		return errors.New("unknown project")
+	}
+	if dir == ForcePC && p.Mode != ModeSync {
+		return errors.New("this folder is set to Back up only, so there is no shared copy to copy from. Change it to Sync first")
+	}
+	st := m.stateLocked(key)
+	st.Force = dir
+	st.Decision, st.Snoozed, st.Hold = nil, nil, ""
+	st.Status = "starting"
+	if dir == ForceServer {
+		m.eventLocked(key, "info", "Replacing the server copy with this folder.")
+	} else {
+		m.eventLocked(key, "info", "Replacing this folder with the server copy (replaced files go to the project trash).")
+	}
+	return m.saveStateLocked(key)
+}
+
 // AskAgain forgets a "Not now" so the question is asked again at the next sync.
 func (m *Manager) AskAgain(key string) error {
 	m.mu.Lock()
@@ -695,6 +732,7 @@ func (m *Manager) finish(key, item string, version int, base *Manifest, status s
 	defer m.mu.Unlock()
 	st := m.stateLocked(key)
 	st.BaseVersion, st.BaseItem = version, item
+	st.Force = ""
 	st.LastSync = m.Now()
 	st.Status = status
 	st.Error, st.Fix, st.Detail = "", "", ""
@@ -919,6 +957,7 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	m.mu.Lock()
 	st := m.stateLocked(p.Key)
 	baseVersion := st.BaseVersion
+	force := st.Force
 	m.mu.Unlock()
 	if err := checkFolder(p.Folder, baseVersion); err != nil {
 		return err
@@ -973,7 +1012,7 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	localGit := readGit(p.Folder)
 
 	// Git guard: don't mix files from two different checkouts.
-	if R != nil && R.Device != m.DeviceName && differentCheckout(R.Git, localGit) {
+	if force == "" && R != nil && R.Device != m.DeviceName && differentCheckout(R.Git, localGit) {
 		choice := m.Settings.GitGuard
 		gitMsg := fmt.Sprintf("%s has %s @ %s checked out; this PC has %s @ %s. Syncing now would mix files from the two. Pull/push or switch branch first, or sync anyway?",
 			R.Device, R.Git.Branch, R.Git.Head, localGit.Branch, localGit.Head)
@@ -1005,7 +1044,7 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 
 	// First link: this folder has files but has never synced with the server copy.
 	linkChoice := ""
-	if B == nil && R != nil && len(local) > 0 {
+	if B == nil && R != nil && len(local) > 0 && force == "" {
 		linkChoice = m.Settings.FirstLink
 		if o := m.once(p.Key, "first-link"); o != "" {
 			linkChoice = o
@@ -1038,6 +1077,12 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 		baseFiles = B.Files
 	}
 	acts := plan(local, p.visible(files(R)), p.visible(baseFiles))
+	switch force {
+	case ForceServer:
+		linkChoice = LinkLocal
+	case ForcePC:
+		linkChoice = LinkServer
+	}
 	switch linkChoice {
 	case LinkServer: // make this folder match the server
 		for i := range acts {
@@ -1115,7 +1160,7 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	}
 	// Big changes, if set to ask (not asked twice for removals already OK'd).
 	threshold := max(50, len(local)/5)
-	if len(dels) > threshold && !deletesOK && m.Settings.BigChange == BigAsk && m.once(p.Key, "big-change") != "yes" {
+	if len(dels) > threshold && !deletesOK && force == "" && m.Settings.BigChange == BigAsk && m.once(p.Key, "big-change") != "yes" {
 		return m.waitFor(p.Key, &Decision{Kind: "big-change", Paths: dels,
 			Message: fmt.Sprintf("This sync would move %d of %d files in %s to the trash. Go ahead?", len(dels), len(local), p.Name)})
 	}
