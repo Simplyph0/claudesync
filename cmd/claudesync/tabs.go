@@ -608,7 +608,7 @@ func (a *App) settingsTab() fyne.CanvasObject {
 	}
 	projDefault := pick([]string{"Off (I'll pick)", "Back up only", "Sync"}, modeValues, c.ProjectDefault)
 	gitDefault := pick([]string{"Back up only", "Sync"}, []string{projsync.ModeBackup, projsync.ModeSync}, c.ProjectGitDefault)
-	clashPol := pick([]string{"Keep both", "Newest wins", "Ask me"}, clashVals[1:], c.ClashPolicy)
+	clashPol := pick([]string{"Keep both (leaves a copy to delete)", "Newest wins (default)", "Ask me"}, clashVals[1:], c.ClashPolicy)
 	firstLink := pick([]string{"Ask me (show a preview)", "Always merge", "Always use the server's copy", "Always use this PC's copy"},
 		[]string{projsync.LinkAsk, projsync.LinkMerge, projsync.LinkServer, projsync.LinkLocal}, c.FirstLink)
 	bigChange := pick([]string{"Ask me", "Always go ahead"}, []string{projsync.BigAsk, projsync.BigContinue}, c.BigChange)

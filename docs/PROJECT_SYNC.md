@@ -11,11 +11,13 @@ ClaudeSync syncs your chats today. This adds your project folders too.
   PCs changes unless you ask to download a copy.
 - **Sync** keeps the folder the same on every PC you link it on.
 - **When the same file changed on two PCs**, you pick what happens, per project:
-  - **Keep both** (default): both versions end up on every PC. The PC that spots the
-    clash keeps its own file in place, and the other version sits next to it as
-    `main (from Laptop).cpp`.
-  - **Newest wins:** the most recently edited copy replaces the other. The replaced
-    copy goes to ClaudeSync's trash, never just disappears.
+  - **Newest wins** (default): the most recently edited copy replaces the other on
+    every PC. The replaced copy goes to ClaudeSync's trash and stays in the server's
+    History, so nothing is left for you to delete and nothing is lost.
+  - **Keep both:** both versions end up on every PC. The PC that spots the clash keeps
+    its own file in place, and the other version sits next to it as
+    `main (from Laptop 2026-11-05 1430).cpp`. The folder's card offers to move such
+    leftover copies to the trash in one click.
   - **Ask me:** ClaudeSync lists the clash and you choose for each file.
 - **Text files where the two PCs changed different parts** are merged automatically,
   line by line, the way git does. Most clashes never reach you.
@@ -181,12 +183,15 @@ so they're recreated.
    the base as the common ancestor. If the two PCs edited different lines, both edits
    are kept and nobody is asked. This is the common case for code.
 2. **Still clashing** (same lines edited, or a binary file): apply the project's policy.
-   - **Keep both** (default): this PC's file stays. The server's arrives as
+   - **Newest wins** (default): compare modification times; the newer file replaces the
+     other on every PC. The losing file goes to the trash, and the folder's activity log
+     says which one won. Edits less than 10 seconds apart can't be ordered by file time
+     (clocks differ a little), so both PCs break the tie the same way, by comparing
+     the files' checksums, and so end up with the same file instead of copies.
+   - **Keep both:** this PC's file stays. The server's arrives as
      `name (from Laptop 2026-10-26 2215).ext`. Both upload, so every PC ends up with
-     both, and the Projects tab shows a badge until you delete the copy you don't want.
-   - **Newest wins:** compare modification times. If they're within 2 minutes of each
-     other, treat it as too close to call and use Keep both. The losing file goes to
-     the trash, and the log says which one won and why.
+     both, and the folder's card offers **Move N copies to the trash** (originals stay;
+     the other PCs move theirs at their next sync).
    - **Ask me:** the clash waits in a **Clashes** list showing both versions (size,
      time, which PC, and a line diff for text). Choose **Keep mine**, **Take theirs**
      or **Keep both**. The rest of the project keeps syncing meanwhile.
@@ -248,7 +253,7 @@ Every situation where ClaudeSync could guess wrong has a setting (Settings → P
 
 | Situation | Choices | Default |
 |---|---|---|
-| Same file changed on two PCs | Keep both / Newest wins / Ask me (per project too) | Keep both |
+| Same file changed on two PCs | Newest wins / Keep both / Ask me (per project too) | Newest wins |
 | Linking a folder that already has files | Ask me (preview) / Always merge / Always use the server's copy / Always use this PC's copy | Ask me |
 | A sync would remove many files (over 50, or over 20%) | Ask me / Always go ahead | Ask me |
 | PCs on different git branches | Ask me / Always sync anyway / Never (wait) | Ask me |
@@ -352,7 +357,7 @@ pick **Sync** for it.
 ## Decisions made
 
 1. New projects start Off until you pick them.
-2. Keep both is the default clash rule.
+2. Newest wins is the default clash rule (before v0.7.1 it was Keep both; settings that still said Keep both were moved over once).
 3. Pushed git projects default to Back up only.
 4. Limits: 200 MB per file, 2 GB per project (asks above), trash 30 days / 5 GB. All adjustable.
 

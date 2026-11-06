@@ -32,6 +32,7 @@ type scanResult struct {
 	files     map[string]*Entry
 	unsettled map[string]bool // changed in the last few seconds; treated as unchanged this time
 	skipped   []Skip
+	copies    []string // leftover "(from PC date)" copies whose original is still here
 	total     int64
 }
 
@@ -141,6 +142,7 @@ func (s *scanner) scan() (*scanResult, error) {
 		return nil
 	})
 	s.cache = newCache
+	res.copies = findCopies(res.files)
 	return res, err
 }
 

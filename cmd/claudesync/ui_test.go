@@ -85,7 +85,10 @@ func TestScreens(t *testing.T) {
 	mkProj(fa, "sketch.ino", "desktop version")
 	mkProj(fa, "notes.txt", "x")
 	pmA.SetProject(projsync.Project{Key: "name:sketch", Name: "sketch", Folder: fa, Mode: projsync.ModeSync})
-	pmA.SetProject(projsync.Project{Key: "name:website", Name: "website", Folder: t.TempDir(), Mode: projsync.ModeBackup, Ignore: []string{"*.log", "build/"}})
+	web := t.TempDir() // with a copy left behind by an earlier "Keep both" clash
+	mkProj(web, "report.txt", "this PC")
+	mkProj(web, "report (from Laptop 2026-11-05 1430).txt", "the laptop's")
+	pmA.SetProject(projsync.Project{Key: "name:website", Name: "website", Folder: web, Mode: projsync.ModeBackup, Ignore: []string{"*.log", "build/"}})
 	// a turned-off project whose folder is long gone
 	pmA.SetProject(projsync.Project{Key: "name:sonix-player", Name: "sonix-player", Folder: filepath.Join(t.TempDir(), "gone-too"), Mode: projsync.ModeOff})
 	// a folder that has gone missing (an unplugged drive, say)
@@ -192,6 +195,9 @@ func TestScreens(t *testing.T) {
 	gitQ := a.questionBox("name:sketch", &projsync.Decision{Kind: "git", Message: "Laptop has main @ 1b3efe1eef75 checked out; this PC has main @ 89da41b6f4cb. Syncing now would mix files from the two. Pull/push or switch branch first, or sync anyway?"}, nil)
 	save("question-git", gitQ)
 	fyne.DoAndWait(func() { a.win.Resize(fyne.NewSize(760, 1500)) })
+	if s := pmA.Projects(); len(s) == 0 {
+		t.Fatal("no projects")
+	}
 	save("settings-full", a.settingsTab())
 	tall := a.mainUI().(*container.AppTabs)
 	fyne.DoAndWait(func() { tall.SelectIndex(1) })

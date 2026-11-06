@@ -41,6 +41,7 @@ type Settings struct {
 	ProjectDefault    string `json:"projectDefault"`    // new projects: off / backup / sync
 	ProjectGitDefault string `json:"projectGitDefault"` // the most a pushed git project gets by default
 	ClashPolicy       string `json:"clashPolicy"`       // keep-both / newest / ask
+	SettingsVersion   int    `json:"settingsVersion"`   // 1: Newest wins became the default clash rule
 	FirstLink         string `json:"firstLink"`         // ask / merge / server / local
 	BigChange         string `json:"bigChange"`         // ask / continue
 	GitGuard          string `json:"gitGuard"`          // ask / sync / skip
@@ -74,7 +75,7 @@ func Defaults() Settings {
 		DeviceName: host, BackupMinutes: 30, RestoreMinutes: 30,
 		Sessions: true, Config: true, Memory: true, Scratch: true, ScratchMaxMB: 200,
 		SearchRoots: roots, StartAtLogin: true,
-		ProjectDefault: "off", ProjectGitDefault: "backup", ClashPolicy: "keep-both", FirstLink: "ask", BigChange: "ask",
+		ProjectDefault: "off", ProjectGitDefault: "backup", ClashPolicy: "newest", SettingsVersion: 1, FirstLink: "ask", BigChange: "ask",
 		ForgetChatless: true, GitGuard: "ask", RemoteDeletes: "trash", MaxFileMB: 200, MaxProjectMB: 2048, TrashDays: 30, TrashGB: 5,
 	}
 }
@@ -101,6 +102,18 @@ func Load() (Settings, error) {
 		return s, err
 	}
 	err = json.Unmarshal(b, &s)
+	// Settings saved before version 1 still say Keep both, which was the old
+	// default and leaves a "(from PC date)" copy of every clashing file to
+	// delete by hand. Move them to the new default once; choosing Keep both
+	// again in Settings is kept.
+	var probe struct{ SettingsVersion int }
+	_ = json.Unmarshal(b, &probe)
+	if probe.SettingsVersion < 1 {
+		if s.ClashPolicy == "keep-both" {
+			s.ClashPolicy = "newest"
+		}
+		s.SettingsVersion = 1
+	}
 	if s.BackupMinutes < 1 {
 		s.BackupMinutes = 30
 	}

@@ -349,6 +349,7 @@ func TestFirstLinkAskThenMerge(t *testing.T) {
 	a.write("both.bin", "\x00A", time.Hour)
 	a.sync()
 	b := w.pc("B", ModeSync)
+	b.m.Settings.ClashPolicy = ClashKeepBoth // this test is about Merge keeping both versions
 	b.write("shared.txt", "same", time.Hour)
 	b.write("b-only.txt", "b", time.Hour)
 	b.write("both.bin", "\x00B", time.Hour)

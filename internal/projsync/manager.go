@@ -32,7 +32,7 @@ const (
 // The "always do X / ask me" choices.
 const (
 	ClashKeepBoth = "keep-both" // the other PC's version arrives next to yours
-	ClashNewest   = "newest"    // the most recently edited version wins; the other goes to trash
+	ClashNewest   = "newest"    // the most recently edited version wins; the other goes to trash (the default)
 	ClashAsk      = "ask"
 
 	LinkAsk    = "ask" // linking a folder that already has files: show a preview
@@ -67,7 +67,7 @@ type Settings struct {
 }
 
 func DefaultSettings() Settings {
-	return Settings{ClashPolicy: ClashKeepBoth, FirstLink: LinkAsk, BigChange: BigAsk, GitGuard: GitAsk,
+	return Settings{ClashPolicy: ClashNewest, FirstLink: LinkAsk, BigChange: BigAsk, GitGuard: GitAsk,
 		RemoteDeletes: DeletesTrash, MaxFileMB: 200, MaxProjectMB: 2048, TrashDays: 30, TrashGB: 5}
 }
 
@@ -125,6 +125,7 @@ type pstate struct {
 	Status      string                `json:"status"`
 	Error       string                `json:"error,omitempty"`
 	Skipped     []Skip                `json:"skipped,omitempty"`
+	Copies      []string              `json:"copies,omitempty"`   // leftover "(from PC date)" copies of clashed files
 	Snoozed     map[string]string     `json:"snoozed,omitempty"`  // decision kind -> the question you said "Not now" to
 	Approved    map[string]string     `json:"approved,omitempty"` // decision kind -> the question you said yes to, for these exact facts
 	Hold        string                `json:"hold,omitempty"`     // the snoozed question that kept the last sync from running
@@ -144,13 +145,14 @@ type Status struct {
 	Decision *Decision
 	Clashes  []Clash
 	Skipped  []Skip
-	OnHold   string  // a question you said "Not now" to, which is why nothing is syncing
-	Fix      string  // what to do about Error
-	Detail   string  // the raw error
-	Progress string  // what a running sync is doing
-	Active   bool    // a sync is running now
-	Last     *Result // what the last finished sync did
-	Events   []Event // newest last
+	Copies   []string // leftover "(from PC date)" copies of clashed files
+	OnHold   string   // a question you said "Not now" to, which is why nothing is syncing
+	Fix      string   // what to do about Error
+	Detail   string   // the raw error
+	Progress string   // what a running sync is doing
+	Active   bool     // a sync is running now
+	Last     *Result  // what the last finished sync did
+	Events   []Event  // newest last
 }
 
 type Manager struct {
@@ -293,7 +295,7 @@ func (m *Manager) Projects() []Status {
 	var out []Status
 	for _, p := range m.projects {
 		st := m.stateLocked(p.Key)
-		s := Status{Project: *p, LastSync: st.LastSync, Status: st.Status, Error: st.Error, Decision: st.Decision, Skipped: st.Skipped,
+		s := Status{Project: *p, LastSync: st.LastSync, Status: st.Status, Error: st.Error, Decision: st.Decision, Skipped: st.Skipped, Copies: append([]string(nil), st.Copies...),
 			OnHold: st.Hold, Fix: st.Fix, Detail: st.Detail, Progress: m.progress[p.Key], Active: m.active[p.Key], Events: append([]Event(nil), st.Events...)}
 		if st.Last != nil {
 			l := *st.Last
@@ -589,6 +591,7 @@ func (m *Manager) scanFolder(p Project, st *pstate) (*scanResult, error) {
 		m.eventLocked(p.Key, "warn", "%d file(s) are left out: %s (%s)", len(res.skipped), res.skipped[0].Path, res.skipped[0].Why)
 	}
 	st.Skipped = res.skipped
+	st.Copies = res.copies
 	m.mu.Unlock()
 	nf, nb := countFiles(res.files)
 	rs := m.res(p.Key)
@@ -1236,22 +1239,22 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 					choice = map[string]string{"mine": "mine", "theirs": "theirs", "both": ClashKeepBoth}[parts[0]]
 				}
 			}
-			if choice == ClashNewest {
-				switch d := l.Mtime.Sub(r.Mtime); {
-				case d > 2*time.Minute:
-					choice = "mine"
-				case d < -2*time.Minute:
-					choice = "theirs"
-				default:
-					choice = ClashKeepBoth // too close to call
-				}
+			newest := choice == ClashNewest
+			if newest {
+				choice = newestOf(l, r)
 			}
 			switch choice {
 			case "mine":
 				N.Files[a.path] = l
 				uploads = append(uploads, a.path)
+				if newest {
+					m.event(p.Key, "info", "%s changed on both PCs: kept this PC's, the newer one. The other PC's version is in History.", a.path)
+				}
 			case "theirs":
 				writes = append(writes, pendingWrite{rel: a.path, e: r})
+				if newest {
+					m.event(p.Key, "info", "%s changed on both PCs: took %s's, the newer one. This PC's is in the project trash.", a.path, R.Device)
+				}
 			case ClashAsk:
 				clashes[a.path] = &Clash{Path: a.path, LocalHash: l.Hash, RemoteHash: r.Hash, LocalTime: l.Mtime, RemoteTime: r.Mtime,
 					LocalSize: l.Size, RemoteSize: r.Size, RemoteDevice: R.Device}
@@ -1285,6 +1288,7 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 	}
 
 	// 3. Change this PC's folder (everything replaced or removed goes to trash first).
+	var fresh []string
 	for i, wr := range writes {
 		m.setProgress(p.Key, "Receiving file %d of %d: %s", i+1, len(writes), wr.rel)
 		data := wr.data
@@ -1298,13 +1302,25 @@ func (m *Manager) sync(ctx context.Context, p Project) error {
 		if err := w.put(wr.rel, wr.e, data); err != nil {
 			errs = append(errs, err)
 			w.failed[wr.rel] = true
+		} else if orig, ok := originalOf(wr.rel); ok && N.Files[orig] != nil && !N.Files[orig].Dir {
+			fresh = append(fresh, wr.rel) // a leftover copy arrived or was just made
 		}
+	}
+	if len(fresh) > 0 {
+		m.mu.Lock()
+		st.Copies = addCopies(st.Copies, fresh)
+		m.mu.Unlock()
 	}
 	for _, rel := range removes {
 		if err := w.remove(rel); err != nil {
 			errs = append(errs, err)
 			w.failed[rel] = true
 		}
+	}
+	if len(removes) > 0 {
+		m.mu.Lock()
+		st.Copies = dropCopies(st.Copies, removes, w.failed)
+		m.mu.Unlock()
 	}
 	if w.batch.count() > 0 {
 		m.logf("project %s: %d replaced/removed file(s) saved to trash", p.Name, w.batch.count())

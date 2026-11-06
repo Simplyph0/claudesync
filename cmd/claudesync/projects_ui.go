@@ -35,7 +35,7 @@ var (
 	clashLong = []string{
 		"Use my default (Settings → Project folders)",
 		"Keep both: the other copy is saved next to yours, nothing is lost",
-		"Newest wins: the most recently edited copy replaces the other (the replaced one goes to the trash)",
+		"Newest wins (default): the most recently edited copy replaces the other. The replaced one goes to the trash; nothing is left for you to delete",
 		"Ask me: each clash shows up here for you to decide",
 	}
 )
@@ -403,6 +403,9 @@ func (a *App) projectCard(s projsync.Status) fyne.CanvasObject {
 				}
 			}
 			parts = append(parts, wrapLabel(line))
+		}
+		if len(s.Copies) > 0 {
+			parts = append(parts, a.copiesBox(s))
 		}
 		if len(s.Skipped) > 0 {
 			parts = append(parts, importantLabel(fmt.Sprintf("⚠ %s left out. Open Details to see which and why.", plural(len(s.Skipped), "file is", "files are")), widget.WarningImportance))
@@ -1132,4 +1135,45 @@ func (a *App) projectSummaryLine(l *widget.Label) {
 		l.SetText(text)
 	}
 	l.Show()
+}
+
+// copiesBox offers to clear the "(from PC date)" copies earlier clashes left.
+func (a *App) copiesBox(s projsync.Status) fyne.CanvasObject {
+	show := s.Copies
+	more := ""
+	if len(show) > 5 {
+		more = fmt.Sprintf("\n…and %d more", len(show)-5)
+		show = show[:5]
+	}
+	btn := widget.NewButtonWithIcon(fmt.Sprintf("Move %s to the trash", plural(len(s.Copies), "copy", "copies")), theme.DeleteIcon(), func() {
+		dialog.ShowConfirm("Move the leftover copies to the trash?",
+			fmt.Sprintf("%s\n\nThe original files stay. The copies go to the project trash (Recover tab), and your other PCs move theirs to the trash too at their next sync.",
+				strings.Join(show, "\n")+more), func(ok bool) {
+				if !ok {
+					return
+				}
+				pm := a.projects()
+				if pm == nil {
+					return
+				}
+				go func() {
+					n, err := pm.TidyCopies(s.Key)
+					if n > 0 {
+						_ = pm.Sync(a.ctx, s.Key) // tell the other PCs now
+					}
+					fyne.Do(func() {
+						if err != nil {
+							a.showProblem("Some copies couldn't be moved", err, s.Folder)
+						}
+						if a.refreshUI != nil {
+							a.refreshUI()
+						}
+					})
+				}()
+			}, a.win)
+	})
+	return container.NewVBox(
+		importantLabel(fmt.Sprintf("⚠ %s from earlier clashes (named \"… (from PC date)\") ha%s the original beside %s.",
+			plural(len(s.Copies), "copy", "copies"), map[bool]string{true: "s", false: "ve"}[len(s.Copies) == 1], map[bool]string{true: "it", false: "them"}[len(s.Copies) == 1]), widget.WarningImportance),
+		subtle(strings.Join(show, "\n")+more), btn)
 }
