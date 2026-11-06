@@ -19,7 +19,7 @@ server.
 | Server form | Headless background service (Windows service / systemd unit) |
 | History | Server keeps the last N versions per item, default 20, configurable |
 | Conflicts | Keep both: the other PC's diverged copy is restored as a separate session titled "(from <PC>)" |
-| Restore while the desktop app runs | Wait; apply as soon as Claude is closed. "Close Claude and load updates" asks Claude to quit normally and reopens it; never force-closes |
+| Restore while the desktop app runs | Wait; apply as soon as Claude is closed. "Close Claude and load updates" asks Claude to quit, stops whatever is left if it hangs (v0.7.2), and reopens it |
 | Unknown desktop session format | Keep backing up raw files, pause restoring desktop sessions, notify |
 | Client UX | Tray icon, start at login, desktop notifications; backup interval default 30 min, restore interval set separately |
 | Path mapping | Auto-match projects by git remote URL, then folder name; GUI lets you override per PC |
@@ -84,8 +84,10 @@ Safety rules, in priority order:
    replaced.
 2. **Back up first.** Every sync uploads this PC's changes before restoring anything.
 3. **Never touch a running Claude.** Session restores wait until the desktop app is
-   closed. ClaudeSync only ever asks Claude to quit; it never kills it. It relaunches
-   Claude only through Claude's own launcher.
+   closed. "Close Claude and load updates" asks Claude to stop and, only if it hangs,
+   stops its leftover processes (tray icon, helpers) so it can start again; every chat
+   of this PC is backed up before that, and a snapshot is taken before anything is
+   restored. It relaunches Claude only through Claude's own launcher.
 
 Each sync:
 
@@ -99,9 +101,12 @@ Each sync:
   - **Missing:** this PC had the item, it is gone, and Claude left no `deleted_` marker,
     so restore it (self-heal).
   - **Deleted in Claude:** there is a `deleted_` marker, so don't restore it here.
-- **Conflict:** the item changed both here and elsewhere. For sessions, keep both: the
-  other PC's version becomes a copy titled "(from <PC>)". For settings and memory, the
-  newer version wins; this PC's copy is kept in the snapshot.
+- **Conflict:** the item changed both here and elsewhere. For sessions this is judged by
+  the messages (each has a uuid), because Claude rewrites a chat's record just by opening
+  it: if one copy has all the messages of the other it wins and no copy is made; only when
+  each has messages the other lacks is the other PC's version kept as a copy titled
+  "(from <PC>)". For settings and memory, the newer version wins; this PC's copy is kept
+  in the snapshot.
 - **Unreadable server version:** if the newest server version is unreadable (uploaded by
   0.1), use the newest readable one from history.
 

@@ -107,12 +107,17 @@ After setup ClaudeSync lives in the tray:
   PC without being deleted in Claude, the next sync restores it. Sessions you delete
   in Claude stay deleted on that PC.
 - **If Claude is open**, updates wait. They load the moment Claude is closed, however
-  you close it. ClaudeSync can also ask Claude to quit, but it never force-closes it.
+  you close it. **Close Claude and load updates** closes it for you: it asks Claude to stop,
+  and if Claude hangs half-way (a leftover tray icon, helper processes) it stops what's
+  left, so Claude can really open again. Chats running in Claude stop. Then it loads the
+  updates and opens Claude again, and checks that it came up.
 - **Recover lost chats.** If a conversation is still on disk but missing from Claude's
   sidebar, the **Recover** tab lists it and can add it back. Earlier parts of chats you
   still have are marked, so you don't get duplicates.
-- **If the same session changed on two PCs**, it keeps both. The other PC's version
-  appears as a separate session named "… (from Laptop)".
+- **If the same session changed on two PCs**, it only keeps both when each PC added
+  messages the other doesn't have; the other PC's version then appears as a separate
+  session named "… (from Laptop)". Just opening a chat on one PC changes its record, but
+  that isn't a conflict: the PC that is further along wins, and no copy is made.
 - **Projects** are matched by git remote, then by folder name. Anything it can't find
   waits in the **Projects** tab until you pick the folder.
 - **History:** the server keeps the last 20 versions of everything (you can change

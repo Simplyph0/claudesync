@@ -14,8 +14,7 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-// ErrStillRunning means Claude didn't quit when asked. ClaudeSync never
-// force-closes it; the user has to quit it themselves.
+// ErrStillRunning means Claude didn't quit when asked.
 var ErrStillRunning = errors.New("Claude is still open")
 
 // App is a running desktop app instance (its main process).
@@ -93,7 +92,8 @@ func DesktopRunning() bool {
 	return err != nil || len(apps) > 0
 }
 
-// AskToQuit asks each app to close the normal way. It never kills anything.
+// AskToQuit asks each app to close the normal way. It never kills anything
+// (Quit, in quit.go, goes further when that isn't enough).
 // On Windows this is the same as clicking the window's ✕, which Claude may
 // answer by hiding in the tray, so callers must not assume it worked.
 func AskToQuit(apps []App) {
@@ -144,20 +144,40 @@ func Relaunch(apps []App) error {
 	case "darwin":
 		return exec.Command("open", "-a", "Claude").Start()
 	}
+	env := launchEnv(a.Env)
 	for _, kv := range a.Env {
 		if p, ok := strings.CutPrefix(kv, "APPIMAGE="); ok && p != "" {
-			return startDetached(p)
+			return startDetached(p, env)
 		}
 	}
 	if p, err := exec.LookPath("claude-desktop"); err == nil {
-		return startDetached(p)
+		return startDetached(p, env)
 	}
 	return errors.New("no Claude launcher found")
 }
 
-func startDetached(path string) error {
+// launchEnv is this process's environment, plus the display and session
+// variables the old Claude had if ClaudeSync was started without them (from a
+// login script or a service), so the new Claude can find the screen and the tray.
+func launchEnv(old []string) []string {
+	env := os.Environ()
+	for _, key := range []string{"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+		"XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "DESKTOP_SESSION"} {
+		if os.Getenv(key) != "" {
+			continue
+		}
+		for _, kv := range old {
+			if strings.HasPrefix(kv, key+"=") {
+				env = append(env, kv)
+			}
+		}
+	}
+	return env
+}
+
+func startDetached(path string, env []string) error {
 	c := exec.Command(path)
-	c.Env = os.Environ()
+	c.Env = env
 	detach(c)
 	return c.Start()
 }

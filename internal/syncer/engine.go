@@ -634,24 +634,41 @@ func (e *Engine) applyOne(ctx context.Context, p *Pending, scan *ScanResult, ind
 		}
 		if st == nil || lh != st.Hash {
 			if h.Kind == proto.KindSession {
-				cp, err := AsCopy(it, hdr.DeviceName)
-				if err != nil {
-					return wait(WaitError, err.Error())
-				}
-				if err := e.Scanner.Write(cp, t, snap.Snapshot); err != nil {
-					return wait(WaitError, err.Error())
-				}
-				// This PC's copy stays as it is and uploads at the next backup.
 				old := ""
 				if st != nil {
 					old = st.Hash
 				}
-				finish(&ItemState{Version: hdr.Version, Hash: old, Title: local.Title})
-				e.logf("conflict on %q: kept this PC's copy and added %q", it.M.Title, cp.M.Title)
-				return true, true, nil
+				// Claude rewrites a chat's record whenever it's opened, so a chat
+				// that "changed" on both PCs usually only changed its settings.
+				// It is a real conflict only when each PC has messages the other lacks.
+				switch compareConvos(li, it) {
+				case convoLocalAhead:
+					// Nothing to take: this PC's copy already has the other's messages.
+					// It uploads at the next backup.
+					// (Not "done": that would record it as already uploaded.)
+					finish(&ItemState{Version: hdr.Version, Hash: old, Title: local.Title})
+					e.logf("%q: this PC's copy is further along than %s's; kept it", it.M.Title, hdr.DeviceName)
+					return false, false, nil
+				case convoDiverged:
+					cp, err := AsCopy(it, hdr.DeviceName)
+					if err != nil {
+						return wait(WaitError, err.Error())
+					}
+					if err := e.Scanner.Write(cp, t, snap.Snapshot); err != nil {
+						return wait(WaitError, err.Error())
+					}
+					// This PC's copy stays as it is and uploads at the next backup.
+					finish(&ItemState{Version: hdr.Version, Hash: old, Title: local.Title})
+					e.logf("conflict on %q: both PCs added messages since the last sync. Kept this PC's copy and added %q", it.M.Title, cp.M.Title)
+					return true, true, nil
+				}
+				// The other PC's copy is the same chat or further along: use it
+				// (this PC's version is in the snapshot) and don't make a duplicate.
+				e.logf("%q changed here and on %s, but only %s added messages; using %s's copy", it.M.Title, hdr.DeviceName, hdr.DeviceName, hdr.DeviceName)
+			} else {
+				// settings/memory: the newer version wins; this PC's copy is in the snapshot and server history
+				e.logf("%s changed here and on %s; using %s's version (this PC's copy is in the snapshot)", it.M.Title, hdr.DeviceName, hdr.DeviceName)
 			}
-			// settings/memory: the newer version wins; this PC's copy is in the snapshot and server history
-			e.logf("%s changed here and on %s; using %s's version (this PC's copy is in the snapshot)", it.M.Title, hdr.DeviceName, hdr.DeviceName)
 		}
 	}
 

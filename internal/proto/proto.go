@@ -7,7 +7,7 @@ import (
 )
 
 // Version is the protocol/app version reported by both programs.
-const Version = "0.7.1"
+const Version = "0.7.2"
 
 // Item kinds.
 const (

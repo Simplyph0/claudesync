@@ -18,6 +18,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
@@ -56,6 +57,7 @@ type App struct {
 	refreshUI   func()
 	schedOnce   sync.Once
 	reopen      []claude.App             // Claude as it was when ClaudeSync asked it to quit
+	closing     bool                     // closeAndApply is running
 	progressLbl map[string]*widget.Label // live progress text on the folder cards, by project key
 	projAlerts  map[string]string        // what each project folder last told the user about
 	applying    bool
@@ -429,13 +431,9 @@ func (a *App) askRestart(n int) {
 	}, a.win)
 }
 
-const quitHelp = "If Claude only hides (it can keep running in the tray), quit it yourself:\n" +
-	"right-click its tray icon → Quit, or use File → Quit in Claude.\n\n" +
-	"Chats running in Claude stop while it's closed.\n" +
-	"The updates load the moment Claude has closed, then Claude reopens."
-
-// closeAndApply asks Claude to quit (never forcing it), and from then on the
-// watcher loads the updates as soon as Claude is closed and reopens it.
+// closeAndApply closes Claude for real (asking first, then stopping whatever
+// is left, helpers and tray icon included), loads the updates and opens it
+// again. Chats running in Claude stop while it's closed.
 func (a *App) closeAndApply() {
 	e := a.engine()
 	if e == nil {
@@ -451,22 +449,42 @@ func (a *App) closeAndApply() {
 		return
 	}
 	a.mu.Lock()
-	first := a.reopen == nil
+	if a.closing {
+		a.mu.Unlock()
+		return // already on it
+	}
+	a.closing = true
 	a.reopen = apps
 	a.mu.Unlock()
-	if first {
-		a.log.Printf("asked Claude to quit so the updates can load")
-	}
-	claude.AskToQuit(apps)
-	fyne.Do(func() {
+	defer func() {
+		a.mu.Lock()
+		a.closing = false
+		a.mu.Unlock()
+	}()
+
+	var wait *dialog.CustomDialog
+	fyne.DoAndWait(func() {
 		a.showWindow()
-		dialog.ShowInformation("Waiting for Claude to close", "ClaudeSync has asked Claude to quit.\n\n"+quitHelp, a.win)
+		wait = dialog.NewCustomWithoutButtons("Closing Claude", container.NewVBox(
+			wrapLabel("ClaudeSync is closing Claude, including anything it left running in the background. This takes a few seconds.\n\n"+
+				"Chats running in Claude stop. Then the updates load and Claude opens again."),
+			widget.NewProgressBarInfinite()), a.win)
+		wait.Show()
 	})
-	if claude.WaitClosed(a.ctx, 20*time.Second) {
-		a.applyAndReopen()
+	err = claude.Quit(a.ctx, apps, a.log.Printf)
+	fyne.Do(wait.Hide)
+	if err != nil {
+		a.mu.Lock()
+		a.reopen = nil
+		a.mu.Unlock()
+		a.log.Printf("couldn't close Claude: %v", err)
+		fyne.Do(func() {
+			dialog.ShowInformation("Claude didn't close", err.Error()+"\n\nThe updates load as soon as it is closed.", a.win)
+		})
 		return
 	}
-	a.log.Printf("Claude is still open (probably in the tray); the updates load as soon as you quit it")
+	a.log.Printf("Claude is closed")
+	a.applyAndReopen()
 }
 
 // applyAndReopen loads waiting updates now that Claude is closed and, if
@@ -494,9 +512,17 @@ func (a *App) applyAndReopen() {
 	if len(apps) == 0 {
 		return
 	}
+	if e := a.engine(); e != nil {
+		claude.ClearStaleLocks(e.Scanner.Loc.DesktopDir) // a stopped Claude can leave its lock behind
+	}
 	if err := claude.Relaunch(apps); err != nil {
 		a.log.Printf("couldn't reopen Claude: %v", err)
 		a.notify("ClaudeSync", "Updates loaded. Open Claude to see them.")
+		return
+	}
+	if !claude.WaitRunning(a.ctx, 25*time.Second) {
+		a.log.Printf("started Claude, but it hasn't appeared after 25 seconds")
+		a.notify("ClaudeSync", "Updates loaded, but Claude didn't open. Start it from your app menu.")
 		return
 	}
 	a.log.Printf("updates loaded; reopened Claude")
