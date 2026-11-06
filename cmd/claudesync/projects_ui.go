@@ -28,8 +28,8 @@ var (
 	modeValues = []string{projsync.ModeOff, projsync.ModeBackup, projsync.ModeSync}
 	modeLong   = []string{
 		"Off: leave this folder alone",
-		"Back up only: keep a copy on the server, with history. Files on this PC are never changed.",
-		"Sync: keep this folder the same on every PC that is set to Sync",
+		"BACK UP (one way →): this PC sends copies to the server, with history. Nothing from other PCs ever changes the files here.",
+		"SYNC (both ways ⇄): edits, new files and deletes here and on your other PCs are shared, so the folder stays the same everywhere.",
 	}
 	clashVals = []string{"", projsync.ClashKeepBoth, projsync.ClashNewest, projsync.ClashAsk}
 	clashLong = []string{
@@ -192,9 +192,9 @@ func stateOf(s projsync.Status) cardState {
 func modeLine(s projsync.Status) string {
 	switch s.Mode {
 	case projsync.ModeBackup:
-		return "Backing up to your server (one way)"
+		return "BACKUP · one way →  this PC only sends copies to the server"
 	case projsync.ModeSync:
-		return "Syncing with your other PCs (both ways)"
+		return "SYNC · both ways ⇄  changes and deletes are shared with your other PCs"
 	}
 	return "Not synced"
 }
@@ -351,11 +351,16 @@ func (a *App) projectCard(s projsync.Status) fyne.CanvasObject {
 	badge := widget.NewLabelWithStyle(cs.badge, fyne.TextAlignTrailing, fyne.TextStyle{Bold: true})
 	badge.Importance = cs.imp
 	title := container.NewBorder(nil, nil, nil, badge, bold(s.Name))
-	folder := subtle(modeLine(s) + " · " + s.Folder)
+	tag := importantLabel(modeLine(s), widget.LowImportance)
+	if s.Mode == projsync.ModeSync {
+		tag.Importance = widget.HighImportance
+	}
+	tag.TextStyle = fyne.TextStyle{Bold: true}
+	folder := subtle(s.Folder)
 	folder.Wrapping = fyne.TextWrapOff
 	folder.Truncation = fyne.TextTruncateEllipsis
 
-	parts := []fyne.CanvasObject{title, folder}
+	parts := []fyne.CanvasObject{title, tag, folder}
 	missing := folderMissing(s.Folder)
 	if missing && (s.Mode == projsync.ModeOff || s.Paused || s.Error == "") {
 		parts = append(parts, importantLabel("⚠ This folder isn't on this PC any more (moved, renamed, deleted, or on a drive that isn't plugged in).", widget.WarningImportance))
@@ -497,9 +502,38 @@ func (a *App) replaceDialog(key, name, mode string) {
 	if mode != projsync.ModeSync {
 		toPC.Disable()
 	}
+	startOver := widget.NewButton("Delete the server copy for good, start over from this PC", func() {
+		d.Hide()
+		dialog.ShowConfirm("Delete the server copy for good?",
+			"Every saved version of "+name+" on the server is erased, with no way back. This PC's folder then becomes the new original and your other PCs follow it.\n\nFiles on this PC are not touched.", func(ok bool) {
+				if !ok {
+					return
+				}
+				pm := a.projects()
+				if pm == nil {
+					return
+				}
+				go func() {
+					err := pm.StartOver(a.ctx, key)
+					if err == nil {
+						_ = pm.Sync(a.ctx, key)
+					}
+					fyne.Do(func() {
+						if err != nil {
+							a.showProblem("Couldn't start over", err, "")
+						}
+						if a.refreshUI != nil {
+							a.refreshUI()
+						}
+					})
+				}()
+			}, a.win)
+	})
+	startOver.Importance = widget.DangerImportance
 	body := container.NewVBox(
 		wrapLabel("Pick one side to win. Nothing is merged: the other side is made to match it."),
-		toServer, toPC)
+		toServer, toPC, widget.NewSeparator(),
+		wrapLabel("Or wipe the server's history for this folder too:"), startOver)
 	if mode != projsync.ModeSync {
 		body.Add(subtle("The second option needs this folder set to Sync (it's Back up only)."))
 	}
@@ -543,8 +577,9 @@ func (a *App) showProjectHelp() {
 	d := dialog.NewCustom("How project folders work", "Got it", container.NewVScroll(wrapLabel(
 		"Each folder is set to one of three things:\n\n"+
 			"• Off: ClaudeSync ignores it.\n"+
-			"• Back up only: a copy of the folder, with history, is kept on your server. Files on this PC are never changed, and other PCs aren't touched unless you download a copy.\n"+
-			"• Sync: the folder is kept the same on every PC where you set it to Sync. New and changed files travel both ways.\n\n"+
+			"• BACK UP (one way →): this PC sends a copy of the folder, with history, to your server. Nothing coming from other PCs ever changes the files here, and other PCs aren't touched unless you download a copy. Deleting a file here does not delete it anywhere else.\n"+
+			"• SYNC (both ways ⇄): the folder is kept the same on every PC where you set it to Sync. New files, edits and deletes travel both ways.\n\n"+
+			"Backup is a safety copy. Sync is one shared folder. A folder can't be both: if you want other PCs to receive your changes, use Sync.\n\n"+
 			"If the same file changed on two PCs, text files are merged line by line automatically. Anything else follows the folder's choice: keep both, newest wins, or ask you.\n\n"+
 			"Nothing is ever lost quietly: a file that gets replaced or removed goes to the project trash first (Recover tab), and the server keeps earlier versions (History tab).\n\n"+
 			"Folders git already keeps in step (pushed to GitHub) are best left on Back up only.\n\n"+

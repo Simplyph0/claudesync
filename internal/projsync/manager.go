@@ -475,6 +475,36 @@ func (m *Manager) Override(key, dir string) error {
 	return m.saveStateLocked(key)
 }
 
+// StartOver deletes this project's server copy for good (every version) and
+// makes this PC's folder the new original: the next sync uploads it as
+// version 1, and other PCs follow it. Files on this PC aren't touched.
+func (m *Manager) StartOver(ctx context.Context, key string) error {
+	m.mu.Lock()
+	p := m.projects[key]
+	m.mu.Unlock()
+	if p == nil {
+		return errors.New("unknown project")
+	}
+	id := itemID(key)
+	if p.Mode == ModeBackup {
+		id = m.backupID(key)
+	}
+	_, err := m.API.Purge(ctx, proto.KindProject, id)
+	if err != nil && !errors.Is(err, client.ErrNotFound) && !errors.Is(err, client.ErrRemoved) {
+		return err
+	}
+	purged := err == nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.stateLocked(key)
+	m.resetLocked(key) // no base, so even an unchanged folder is uploaded in full
+	if purged {
+		st.Once["purged"] = "yes" // asking was the point
+	}
+	m.eventLocked(key, "info", "Deleted the server copy for good. Starting a new one from this folder.")
+	return m.saveStateLocked(key)
+}
+
 // AskAgain forgets a "Not now" so the question is asked again at the next sync.
 func (m *Manager) AskAgain(key string) error {
 	m.mu.Lock()

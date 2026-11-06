@@ -524,3 +524,30 @@ func noGit(l []string) []string {
 	}
 	return out
 }
+
+func TestStartOverFromThisPC(t *testing.T) {
+	for _, mode := range []string{ModeSync, ModeBackup} {
+		t.Run(mode, func(t *testing.T) {
+			w := newWorld(t)
+			a := w.pc("A", mode)
+			a.write("a.txt", "1", time.Hour)
+			a.sync()
+			a.write("a.txt", "2", 0)
+			a.sync() // version 2
+			if err := a.m.StartOver(context.Background(), key); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.syncErr(); err != nil {
+				t.Fatal(err)
+			}
+			if st := a.status(); st.Decision != nil || st.Error != "" {
+				t.Fatalf("asked or failed: %+v", st)
+			}
+			rp, _ := a.m.RemoteProjects(context.Background())
+			if len(rp) != 1 || rp[0].Removed || rp[0].Version != 1 {
+				t.Fatalf("not a fresh version 1: %+v", rp)
+			}
+			eq(t, "files kept", a.read("a.txt"), "2")
+		})
+	}
+}
