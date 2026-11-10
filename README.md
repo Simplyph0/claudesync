@@ -1,5 +1,9 @@
 # ClaudeSync
 
+> [!WARNING]
+> **ClaudeSync is no longer actively maintained.** It still works, and v0.8.0 is the last release, but it won't get new features or fixes.
+> Its successor, **Braid**, replaces folder syncing with a shared project timeline: no merge questions, git kept intact, and control from any device.
+
 Pick up your Claude desktop-app sessions on any of your PCs. Each PC backs up
 its Claude Code sessions to your own server on a schedule. Your other PCs
 restore them automatically, with project folders remapped to wherever they
